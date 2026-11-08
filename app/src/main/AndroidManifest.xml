@@ -67,6 +67,16 @@
             android:name=".ui.ToolsActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".ui.VideoActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
+            android:name=".ui.LockActivity"
+            android:exported="false"
+            android:excludeFromRecents="true" />
+
         <service
             android:name=".service.DownloadService"
             android:exported="false"

@@ -142,6 +142,13 @@ object Kit {
             else -> "otro"
         }
     }
+
+    /** SHA-256 hex (para guardar el PIN sin guardarlo en claro). */
+    fun sha256(text: String): String {
+        val d = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+        return d.joinToString("") { String.format("%02x", it) }
+    }
 }
 
 /**

@@ -51,25 +51,47 @@ class SettingsActivity : Activity() {
         row("⏳ Descargas simultáneas", "${eng.maxConcurrent()}") { pickMaxConcurrent() }
         row("🔗 Conexiones por descarga", "${eng.sp.getInt("conns", 4)}") { pickConns() }
         row("🚦 Límite de velocidad", limitText()) { pickLimit() }
+        row("📶 Solo Wi-Fi", if (eng.sp.getBoolean("soloWifi", false))
+            "activado: espera Wi-Fi para descargar" else "desactivado") { toggleSoloWifi() }
+        row("🔁 Reintentos automáticos",
+            "${eng.sp.getInt("retries", 1)} reintento(s) con espera progresiva") { pickRetries() }
+        row("⏵ Reanudar descargas al abrir",
+            if (eng.sp.getBoolean("autoResume", false)) "activado" else "desactivado") { toggleAutoResume() }
         row("🔐 Permisos", permText()) { checkPermissions() }
 
         header("Navegador")
         row("🔎 Motor de búsqueda", engineText()) { pickEngine() }
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
+        row("🛡 Bloqueador de anuncios",
+            if (eng.sp.getBoolean("adblock", true)) "activado" else "desactivado") { toggleAdblock() }
         row("🖥 Modo escritorio por defecto",
             if (eng.sp.getBoolean("deskDefault", false)) "activado" else "desactivado") { toggleDesk() }
         row("🧹 Limpiar historial de búsqueda", "") { clearHistory() }
+        row("🕘 Limpiar historial de páginas", "") { clearPageHistory() }
         row("🍪 Limpiar cookies y caché del navegador", "") { clearWeb() }
 
         header("Apariencia")
         row("🔠 Tamaño de fuente", "${eng.sp.getInt("fontScale", 100)}%") { pickFontScale() }
         row("🅰 Tipografía", Ui.FAMILIES.firstOrNull { it.first == Ui.fontFamily(this) }?.second ?: "Sans") { pickFamily() }
-        row("🌓 Tema", if (Ui.isDark(this)) "Oscuro" else "Claro") { pickTheme() }
+        row("🌓 Tema", themeText()) { pickTheme() }
+
+        header("Seguridad y privacidad")
+        row("🔒 Bloqueo con PIN",
+            if ((eng.sp.getString("pinHash", "") ?: "").isNotEmpty()) "activado" else "desactivado") { pickPin() }
+        row("🙈 Ocultar descargas de la galería",
+            if (eng.sp.getBoolean("noMedia", false)) "activado (.nomedia)" else "desactivado") {
+            val nv = !eng.sp.getBoolean("noMedia", false)
+            eng.sp.edit().putBoolean("noMedia", nv).apply()
+            eng.applyNoMedia()
+            buildUi()
+            toast(if (nv) "La galería dejará de mostrar las descargas" else "Las descargas volverán a verse")
+        }
 
         header("Acerca de")
         val about = TextView(this)
-        about.text = "TurboDL 2.1.0 · gestor de descargas multipropósito\n" +
-                "HTTP · FTP · HLS · DASH · BitTorrent · thunder/flashget/qqdl\n" +
+        about.text = "TurboDL 3.0.0 · gestor de descargas multipropósito\n" +
+                "HTTP multihilo · FTP · HLS · DASH · BitTorrent · subtítulos · " +
+                "reproductor interno · navegador con pestañas, marcadores y adblock\n" +
                 "Funciona desde Android 5.0 (API 21). Pensado para equipos de " +
                 "1 GB de RAM: sin AndroidX, pool de hilos acotado y WebView único.\n" +
                 "Gratis, sin anuncios ni suscripciones."
@@ -366,13 +388,103 @@ class SettingsActivity : Activity() {
     }
 
     private fun pickTheme() {
-        val opts = arrayOf("Claro", "Oscuro")
+        val opts = arrayOf("Claro", "Oscuro", "AMOLED (negro puro, ahorra batería)")
+        val cur = Ui.themeMode(this)
         AlertDialog.Builder(this)
             .setTitle("Tema")
-            .setSingleChoiceItems(opts, if (Ui.isDark(this)) 1 else 0) { d, which ->
-                eng.sp.edit().putBoolean("dark", which == 1).apply()
+            .setSingleChoiceItems(opts, cur.coerceIn(0, 2)) { d, which ->
+                eng.sp.edit().putInt("themeMode", which).putBoolean("dark", which >= 1).apply()
                 d.dismiss()
                 recreate()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun themeText(): String = when (Ui.themeMode(this)) {
+        2 -> "AMOLED"
+        1 -> "Oscuro"
+        else -> "Claro"
+    }
+
+    private fun toggleSoloWifi() {
+        val nv = !eng.sp.getBoolean("soloWifi", false)
+        eng.sp.edit().putBoolean("soloWifi", nv).apply()
+        buildUi()
+        toast(if (nv) "Las descargas esperarán a tener Wi-Fi" else "Descarga con cualquier red")
+    }
+
+    private fun toggleAutoResume() {
+        val nv = !eng.sp.getBoolean("autoResume", false)
+        eng.sp.edit().putBoolean("autoResume", nv).apply()
+        buildUi()
+    }
+
+    private fun toggleAdblock() {
+        val nv = !eng.sp.getBoolean("adblock", true)
+        eng.sp.edit().putBoolean("adblock", nv).apply()
+        buildUi()
+    }
+
+    private fun pickRetries() {
+        val opts = arrayOf("0 (sin reintentos)", "1 reintento", "2 reintentos", "3 reintentos")
+        AlertDialog.Builder(this)
+            .setTitle("Reintentos si una descarga falla\n(espera 5 s, 15 s, 60 s entre intentos)")
+            .setSingleChoiceItems(opts, eng.sp.getInt("retries", 1).coerceIn(0, 3)) { d, which ->
+                eng.sp.edit().putInt("retries", which).apply()
+                d.dismiss(); buildUi()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun clearPageHistory() {
+        AlertDialog.Builder(this)
+            .setTitle("¿Borrar todo el historial de páginas?")
+            .setPositiveButton("Borrar") { _, _ ->
+                eng.db.clearHistory()
+                toast("Historial de páginas borrado")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun pickPin() {
+        val cur = (eng.sp.getString("pinHash", "") ?: "").isNotEmpty()
+        if (cur) {
+            AlertDialog.Builder(this)
+                .setTitle("Bloqueo con PIN")
+                .setMessage("El PIN está activado. ¿Quieres quitarlo?")
+                .setPositiveButton("Quitar PIN") { _, _ ->
+                    eng.sp.edit().remove("pinHash").apply()
+                    buildUi()
+                    toast("Bloqueo desactivado")
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            return
+        }
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(50, 30, 50, 0)
+        val txt = TextView(this)
+        txt.text = "PIN de 4-8 dígitos. Se guarda cifrado (SHA-256).\nSi olvidas el PIN, tendrás que borrar los datos de la app."
+        txt.textSize = 12f
+        val pin = android.widget.EditText(this)
+        pin.inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        pin.hint = "PIN"
+        lay.addView(txt); lay.addView(pin)
+        AlertDialog.Builder(this)
+            .setTitle("Activar bloqueo con PIN")
+            .setView(lay)
+            .setPositiveButton("Activar") { _, _ ->
+                val v = pin.text.toString()
+                if (v.length in 4..8) {
+                    eng.sp.edit().putString("pinHash", Kit.sha256(v)).apply()
+                    buildUi()
+                    toast("Bloqueo activado")
+                } else toast("El PIN debe tener 4-8 dígitos")
             }
             .setNegativeButton("Cancelar", null)
             .show()

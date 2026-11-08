@@ -43,6 +43,7 @@ public final class M3u {
         public String mapUri, mapRange;
         public String audioUri;  // grupo EXT-X-MEDIA TYPE=AUDIO con URI (resuelto)
         public String audioName = "";
+        public String subsUri;   // grupo EXT-X-MEDIA TYPE=SUBTITLES con URI (resuelto)
         public double durationSec;   // suma de EXTINF (listas de medios)
         public long byterangeTotal = -1; // suma de BYTERANGE si esta completa
         public int width, height;
@@ -94,6 +95,9 @@ public final class M3u {
                         String nm = attr(l, "NAME");
                         p.audioName = (nm != null) ? nm : "";
                     }
+                }
+                if ("SUBTITLES".equals(t) && u != null && !u.isEmpty() && p.subsUri == null) {
+                    p.subsUri = resolve(base, u);
                 }
             } else if (l.startsWith("#EXT-X-MAP:")) {
                 String u = attr(l, "URI");

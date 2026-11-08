@@ -15,5 +15,8 @@ class App : Application() {
 
     companion object {
         lateinit var app: App
+
+        /** false mientras el PIN no haya sido validado en esta ejecucion. */
+        @Volatile var unlocked: Boolean = false
     }
 }

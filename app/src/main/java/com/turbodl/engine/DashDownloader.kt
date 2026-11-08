@@ -110,6 +110,15 @@ class DashDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                     Merge.normalize(engine, task, task.fileName)
                     task.state = St.DONE
                 }
+                // subtítulos de texto del manifiesto + verificación del MP4
+                val subsRep = info.other.firstOrNull {
+                    it.mimeType.contains("text") && !it.mimeType.contains("mp4")
+                }
+                if (subsRep != null) {
+                    val note = Subs.tryDownload(engine, task, "", subsRep, task.url)
+                    if (note.isNotEmpty()) task.putExtra("note2", note)
+                }
+                Merge.validate(engine, task)
             }
             engine.db.update(task)
             engine.notifyChanged()

@@ -52,6 +52,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         Ui.theme(this)
         super.onCreate(savedInstanceState)
+        // puerta de bloqueo con PIN (si esta activo y aun no se valido)
+        val eng0 = App.app.engine
+        if ((eng0.sp.getString("pinHash", "") ?: "").isNotEmpty() && !App.unlocked) {
+            startActivity(Intent(this, LockActivity::class.java))
+            finish()
+            return
+        }
         setContentView(R.layout.main)
         eng = App.app.engine
         list = findViewById(R.id.list)
@@ -162,17 +169,77 @@ class MainActivity : Activity() {
         pm.menu.add(0, 1, 0, "⏸ Pausar todo")
         pm.menu.add(0, 2, 1, "▶ Reanudar todo")
         pm.menu.add(0, 3, 2, "↕ Ordenar lista…")
-        pm.menu.add(0, 4, 3, "🚪 Salir (cerrar del todo)")
+        pm.menu.add(0, 5, 3, if (eng.sp.getBoolean("compactView", false))
+            "📋 Vista normal" else "📋 Vista compacta")
+        pm.menu.add(0, 6, 4, "💾 Uso de almacenamiento")
+        pm.menu.add(0, 4, 5, "🚪 Salir (cerrar del todo)")
         pm.setOnMenuItemClickListener { mi ->
             when (mi.itemId) {
                 1 -> { eng.pauseAll(); toast("Todo pausado") }
                 2 -> { eng.resumeAll(); maybeStartService() }
                 3 -> showSortMenu()
+                5 -> {
+                    val nv = !eng.sp.getBoolean("compactView", false)
+                    eng.sp.edit().putBoolean("compactView", nv).apply()
+                    refresh()
+                }
+                6 -> showStoragePanel()
                 4 -> confirmExit()
             }
             true
         }
         pm.show()
+    }
+
+    /** Panel: cuanto ocupa cada descarga, total y espacio libre. */
+    private fun showStoragePanel() {
+        Thread {
+            val rows = ArrayList<Pair<String, Long>>()
+            var total = 0L
+            val snap = synchronized(eng.tasks) { eng.tasks.values.toList() }
+            for (t in snap) {
+                val size = try {
+                    val docUri = t.extra().optString("docUri", "")
+                    if (t.kind == Kind.TORRENT) {
+                        File(t.dir).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+                    } else if (docUri.isNotEmpty()) {
+                        val c = contentResolver.query(Uri.parse(docUri),
+                            arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)
+                        c?.use {
+                            if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else 0L
+                        } ?: 0L
+                    } else File(t.path()).takeIf { it.exists() }?.length() ?: 0L
+                } catch (e: Exception) { 0L }
+                if (size > 0) { rows.add(t.name to size); total += size }
+            }
+            rows.sortByDescending { it.second }
+            val free = try {
+                val st = android.os.StatFs(eng.baseDir.absolutePath)
+                st.availableBytes
+            } catch (e: Exception) { -1L }
+            runOnUiThread {
+                val sb = StringBuilder()
+                sb.append("Total de descargas: ${Kit.fmtBytes(total)}\n")
+                if (free >= 0) sb.append("Espacio libre: ${Kit.fmtBytes(free)}\n\n")
+                if (rows.isEmpty()) sb.append("Sin archivos todavía.")
+                else {
+                    sb.append("Mayores archivos:\n")
+                    for ((name, size) in rows.take(15)) {
+                        sb.append("• ${Kit.fmtBytes(size)} · ${name.take(40)}\n")
+                    }
+                    if (rows.size > 15) sb.append("… y ${rows.size - 15} más")
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("💾 Almacenamiento")
+                    .setMessage(sb.toString())
+                    .setPositiveButton("Cerrar", null)
+                    .setNeutralButton("🧹 Limpiar temporales") { _, _ ->
+                        eng.cleanupTemp()
+                        toast("Temporales de hace +48 h eliminados")
+                    }
+                    .show()
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     private fun showSortMenu() {
@@ -233,6 +300,32 @@ class MainActivity : Activity() {
         super.onResume()
         eng.listener = { refresh() }
         refresh()
+        checkClipboard()
+    }
+
+    /** Enlace copiado detectado: ofrecer descargarlo o abrirlo. */
+    private fun checkClipboard() {
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return
+            if (clip.itemCount == 0) return
+            val text = clip.getItemAt(0).coerceToText(this).toString().trim()
+            if (!text.startsWith("http://") && !text.startsWith("https://")) return
+            if (text.length > 600) return
+            val last = eng.sp.getString("lastClip", "") ?: ""
+            if (text == last) return
+            eng.sp.edit().putString("lastClip", text).apply()
+            AlertDialog.Builder(this)
+                .setTitle("Enlace copiado detectado")
+                .setMessage(text)
+                .setPositiveButton("⬇ Descargar") { _, _ -> showAddDialog(text) }
+                .setNeutralButton("🌐 Abrir en navegador") { _, _ ->
+                    startActivity(Intent(this, BrowserActivity::class.java)
+                        .putExtra("openUrl", text))
+                }
+                .setNegativeButton("Ignorar", null)
+                .show()
+        } catch (e: Exception) { }
     }
 
     override fun onPause() {
@@ -349,7 +442,13 @@ class MainActivity : Activity() {
         else if (t.state == St.QUEUED) labels.add("⏏ Sacar de la cola e iniciar ahora")
         else labels.add("▶ Iniciar ahora")
         if (t.state != St.QUEUED && t.state != St.RUNNING && t.state != St.MERGING) labels.add("⏳ Añadir a la cola")
-        if (t.state == St.DONE && eng.outputExists(t)) labels.add("📂 Abrir archivo")
+        if (t.state == St.DONE && eng.outputExists(t)) {
+            val ext = Kit.extOf(t.fileName)
+            if (ext in MEDIA_EXTS) labels.add("▶ Reproducir")
+            if (ext == "mp4" && t.kind != Kind.TORRENT) labels.add("🎵 Extraer audio (M4A)")
+            labels.add("📂 Abrir archivo")
+            labels.add("📤 Mover a otra carpeta")
+        }
         labels.add("🔗 Copiar enlace")
         labels.add("ℹ Detalles")
         labels.add("🗑 Eliminar")
@@ -362,7 +461,10 @@ class MainActivity : Activity() {
                     "⏏ Sacar de la cola e iniciar ahora" -> eng.startNow(t)
                     "▶ Iniciar ahora" -> { eng.startNow(t); maybeStartService() }
                     "⏳ Añadir a la cola" -> eng.enqueue(t)
+                    "▶ Reproducir" -> playInternally(t)
+                    "🎵 Extraer audio (M4A)" -> extractAudio(t)
                     "📂 Abrir archivo" -> openFile(t)
+                    "📤 Mover a otra carpeta" -> moveTaskPick(t)
                     "🔗 Copiar enlace" -> {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("url", t.url))
@@ -373,6 +475,115 @@ class MainActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    private val MEDIA_EXTS = setOf("mp4", "webm", "mkv", "ts", "mov", "m4a", "mp3", "aac", "flac", "ogg", "opus", "wav", "3gp")
+
+    private fun playInternally(t: Task) {
+        try {
+            val docUri = t.extra().optString("docUri", "")
+            val src = if (docUri.isNotEmpty()) docUri
+            else "content://com.turbodl.files/" + Uri.encode(
+                File(t.path()).canonicalFile.absolutePath
+                    .removePrefix(eng.baseDir.canonicalPath + "/"))
+            val i = Intent(this, VideoActivity::class.java)
+                .putExtra("src", src)
+                .putExtra("title", t.name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(i)
+        } catch (e: Exception) {
+            toast("No se pudo reproducir: ${e.message}")
+        }
+    }
+
+    private fun extractAudio(t: Task) {
+        toast("Extrayendo audio…")
+        Thread {
+            val name = com.turbodl.engine.Merge.extractAudio(eng, t)
+            runOnUiThread {
+                if (name != null) toast("Audio guardado: $name")
+                else toast("No se pudo extraer el audio (¿sin pista de sonido?)")
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** "Mover a otra carpeta": elige arbol SAF, copia y borra el original. */
+    private var moveTarget: Task? = null
+    private fun moveTaskPick(t: Task) {
+        moveTarget = t
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        startActivityForResult(i, 77)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 77 && resultCode == RESULT_OK) {
+            val t = moveTarget ?: return
+            val tree = data?.data ?: return
+            try {
+                contentResolver.takePersistableUriPermission(tree,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            } catch (e: Exception) { }
+            toast("Moviendo…")
+            Thread { moveTask(t, tree) }.apply { isDaemon = true }.start()
+        }
+    }
+
+    private fun moveTask(t: Task, tree: Uri) {
+        try {
+            val docUri = t.extra().optString("docUri", "")
+            val store = com.turbodl.engine.SafStore(this, tree)
+            var doc = store.rootDocUri()
+            doc = store.ensureDir(doc, "TurboDL")
+            doc = store.ensureDir(doc, eng.catNameOf(t.dir))
+            val mime = Kit.mimeOf(t.fileName)
+            val dest = store.ensureFile(doc, t.fileName, mime)
+            val buf = ByteArray(128 * 1024)
+            var copied = 0L
+            // 1) copiar a destino contando bytes
+            store.openSink(dest).use { out ->
+                if (docUri.isNotEmpty()) {
+                    contentResolver.openInputStream(Uri.parse(docUri))?.use { inp ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n < 0) break
+                            out.append(buf, n)
+                            copied += n
+                        }
+                    } ?: throw Exception("origen ilegible")
+                } else {
+                    java.io.FileInputStream(File(t.path())).use { inp ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n < 0) break
+                            out.append(buf, n)
+                            copied += n
+                        }
+                    }
+                }
+            }
+            // 2) borrar origen
+            if (docUri.isNotEmpty()) {
+                com.turbodl.engine.SafStore(this, Uri.parse(t.extra().optString("tree", "")))
+                    .delete(Uri.parse(docUri))
+            } else File(t.path()).delete()
+            // 3) reconfigurar la tarea al nuevo arbol
+            t.putExtra("tree", tree.toString())
+            t.putExtra("docUri", dest.toString())
+            t.dir = com.turbodl.engine.SafStore.treeName(this, tree) + "/TurboDL/" + eng.catNameOf(t.dir)
+            t.total = copied
+            t.done = copied
+            eng.db.update(t)
+            runOnUiThread {
+                refresh()
+                toast("Movido a ${t.dir}")
+            }
+        } catch (e: Exception) {
+            runOnUiThread { toast("No se pudo mover: ${e.message}") }
+        }
     }
 
     private fun showDetails(t: Task) {
@@ -388,6 +599,11 @@ class MainActivity : Activity() {
         msg.append("Destino: ${t.dir}\n")
         val note = t.extra().optString("note", "")
         if (note.isNotEmpty()) msg.append("Nota: $note\n")
+        val note2 = t.extra().optString("note2", "")
+        if (note2.isNotEmpty()) msg.append("$note2\n")
+        val ok = t.extra().optString("ok", "")
+        if (ok == "1") msg.append("Verificación: ✔ correcto\n")
+        else if (ok == "0") msg.append("Verificación: ⚠ revisa la nota\n")
         msg.append("Estado: ${stateName(t.state)}${if (t.error.isNotEmpty()) " — ${t.error}" else ""}")
         AlertDialog.Builder(this).setTitle(t.name).setMessage(msg.toString())
             .setPositiveButton("Cerrar", null).show()
@@ -496,6 +712,7 @@ class MainActivity : Activity() {
             }
 
             // progreso: bytes si hay total real; si no, segmentos (HLS/DASH)
+            val compactView = eng.sp.getBoolean("compactView", false)
             val pct = t.pct()
             if (pct >= 0) {
                 prog.isIndeterminate = false
@@ -525,9 +742,14 @@ class MainActivity : Activity() {
                 St.PAUSED -> "Pausado · ${Kit.fmtBytes(t.done)}$pctInfo$segInfo$qInfo$dInfo"
                 St.DONE -> "Completado · ${Kit.fmtBytes(if (t.total > 0) t.total else t.done)}$qInfo$dInfo"
                 St.ERROR -> "⚠ ${t.error}"
-                St.QUEUED -> "En cola · ${if (t.total > 0) Kit.fmtBytes(t.total) else "tamaño desconocido"}$qInfo$dInfo"
+                St.QUEUED -> {
+                    val wait = extra.optString("wait", "")
+                    if (wait.isNotEmpty()) "⏳ $wait"
+                    else "En cola · ${if (t.total > 0) Kit.fmtBytes(t.total) else "tamaño desconocido"}$qInfo$dInfo"
+                }
                 else -> "En cola$segInfo"
             }
+            info.visibility = if (compactView && t.state == St.DONE) View.GONE else View.VISIBLE
             return v
         }
     }

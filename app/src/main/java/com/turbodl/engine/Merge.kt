@@ -3,7 +3,10 @@ package com.turbodl.engine
 import android.util.Log
 import com.turbodl.model.St
 import com.turbodl.model.Task
+import com.turbodl.util.Kit
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 
 /**
  * Fusion de pistas audio+video en un unico MP4 usando org.mp4parser
@@ -177,6 +180,138 @@ object Merge {
             // el temporal de video solo se borra si era copia (SAF); el local
             // es el propio archivo de salida ya reescrito
             if (task.extra().optString("docUri", "").isNotEmpty()) tmpVideo?.delete()
+            tmpOut?.delete()
+        }
+    }
+
+    /**
+     * Comprueba que un MP4 terminado tiene indice clasico (ftyp+moov al
+     * inicio) y un tamano razonable; deja la verificacion en "ok"/"note".
+     * Lee solo la cabecera: costo nulo incluso en equipos modestos.
+     */
+    fun validate(engine: Engine, task: Task) {
+        try {
+            val docStr = task.extra().optString("docUri", "")
+            var head = ByteArray(64 * 1024)
+            if (docStr.isNotEmpty()) {
+                engine.ctx.contentResolver.openInputStream(android.net.Uri.parse(docStr))?.use {
+                    val n = it.read(head)
+                    if (n >= 0) head = head.copyOf(n)
+                } ?: return
+            } else {
+                val f = File(task.path())
+                if (!f.exists() || f.length() < 2048) {
+                    task.putExtra("ok", "0")
+                    task.putExtra("note", "archivo sospechosamente pequeño")
+                    return
+                }
+                java.io.FileInputStream(f).use { inp ->
+                    val n = inp.read(head)
+                    if (n >= 0) head = head.copyOf(n)
+                }
+            }
+            val s = String(head, Charsets.ISO_8859_1)
+            val hasFtyp = s.contains("ftyp")
+            val hasMoov = s.contains("moov")
+            if (hasFtyp && hasMoov) {
+                task.putExtra("ok", "1")
+                if (task.extra().optString("note", "").isEmpty()) {
+                    task.putExtra("note", "MP4 verificado: índice correcto, se puede buscar posiciones")
+                }
+            } else if (hasFtyp) {
+                task.putExtra("ok", "0")
+                task.putExtra("note", "MP4 sin índice al inicio: el reproductor podría no desplazarse")
+            } else {
+                // TS u otro formato: sin verificacion de indice
+                task.putExtra("ok", "1")
+            }
+        } catch (e: Exception) { }
+    }
+
+    /**
+     * Extrae la pista de audio de un MP4 ya descargado a un M4A junto al
+     * original; la nueva tarea aparece como completada en la lista.
+     * @return nombre del archivo creado o null.
+     */
+    fun extractAudio(engine: Engine, task: Task): String? {
+        var tmpOut: File? = null
+        var tmpSrc: File? = null
+        try {
+            val docStr = task.extra().optString("docUri", "")
+            val src: File = if (docStr.isNotEmpty()) {
+                val f = File(engine.ctx.cacheDir, "aud_${task.id}.mp4")
+                engine.ctx.contentResolver.openInputStream(android.net.Uri.parse(docStr))?.use { inp ->
+                    FileOutputStream(f).use { out -> inp.copyTo(out, 128 * 1024) }
+                } ?: return null
+                f
+            } else {
+                val f = File(task.path())
+                if (!f.exists()) return null else f
+            }
+            tmpSrc = src
+
+            val mv = org.mp4parser.muxer.container.mp4.MovieCreator.build(src.absolutePath)
+            val audio = org.mp4parser.muxer.Movie()
+            for (t in mv.tracks) if (t.handler == "soun") audio.addTrack(t)
+            if (audio.tracks.isEmpty()) return null
+
+            tmpOut = File(engine.ctx.cacheDir, "aud_out_${task.id}.m4a")
+            val container = org.mp4parser.muxer.builder.DefaultMp4Builder().build(audio)
+            FileOutputStream(tmpOut).use { fos -> container.writeContainer(fos.channel) }
+
+            // destino: misma carpeta que el video, nombre "<base> (audio).m4a"
+            val base = task.fileName.removeSuffix(".mp4").removeSuffix(".MP4")
+            val outName = "$base (audio).m4a"
+            val mime = Kit.mimeOf(outName)
+            var docUriOut = ""
+            if (docStr.isNotEmpty()) {
+                val store = SafStore(engine.ctx, android.net.Uri.parse(task.extra().optString("tree", "")))
+                var doc = store.rootDocUri()
+                doc = store.ensureDir(doc, "TurboDL")
+                doc = store.ensureDir(doc, "Audio")
+                val fUri = store.ensureFile(doc, outName, mime)
+                store.openSink(fUri).use { out ->
+                    FileInputStream(tmpOut).use { fis ->
+                        val buf = ByteArray(128 * 1024)
+                        while (true) {
+                            val n = fis.read(buf)
+                            if (n < 0) break
+                            out.append(buf, n)
+                        }
+                    }
+                }
+                docUriOut = fUri.toString()
+            } else {
+                val outF = File(File(task.dir), outName)
+                if (outF.exists()) outF.delete()
+                tmpOut.copyTo(outF, true, 128 * 1024)
+            }
+
+            // registrar como tarea completada propia
+            val nt = Task()
+            nt.url = task.url
+            nt.kind = task.kind
+            nt.name = outName
+            nt.dir = if (docUriOut.isNotEmpty()) task.dir + "/Audio" else task.dir
+            nt.fileName = outName
+            nt.total = tmpOut.length()
+            nt.done = nt.total
+            nt.state = St.DONE
+            nt.time = System.currentTimeMillis()
+            if (docUriOut.isNotEmpty()) {
+                nt.putExtra("tree", task.extra().optString("tree", ""))
+                nt.putExtra("docUri", docUriOut)
+            }
+            nt.putExtra("q", "audio")
+            engine.db.insert(nt)
+            synchronized(engine.tasks) { engine.tasks[nt.id] = nt }
+            engine.notifyChanged()
+            return outName
+        } catch (e: Exception) {
+            Log.w(TAG, "extractAudio fallo: ${e.message}")
+            return null
+        } finally {
+            if (task.extra().optString("docUri", "").isNotEmpty()) tmpSrc?.delete()
             tmpOut?.delete()
         }
     }

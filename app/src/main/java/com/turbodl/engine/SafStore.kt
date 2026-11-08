@@ -15,12 +15,12 @@ import java.util.ArrayList
  * SAF (tarjeta SD / carpeta elegida con el explorador). Los descargadores
  * escriben igual en ambos casos.
  */
-interface Sink {
+interface Sink : AutoCloseable {
     fun seekWrite(off: Long, buf: ByteArray, len: Int)
     fun append(buf: ByteArray, len: Int) = seekWrite(-1L, buf, len)
     fun truncate(len: Long)
     fun size(): Long
-    fun close()
+    override fun close()
     /** Uri del documento (SAF) o null si es archivo local */
     fun docUri(): Uri? = null
 }

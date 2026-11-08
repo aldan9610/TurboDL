@@ -1,9 +1,29 @@
-# TurboDL 2.1.0
+# TurboDL 3.0.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.0.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Motor de descargas | **Reintentos automáticos** con espera progresiva (5 s, 15 s, 60 s); **solo Wi-Fi** (las descargas esperan a tener Wi-Fi); **reanudación tras reiniciar** (tareas a medias quedan pausadas y reanudables, con auto-resumen opcional) |
+| Multimedia | **Reproductor interno** (hardware, sin salir de la app); **extraer audio** de un MP4 descargado a M4A; **subtítulos automáticos**: si el HLS/DASH declara pista de texto se guarda un `.vtt` junto al video |
+| Verificación | Al terminar un MP4 se comprueba el índice (`ftyp`+`moov`) y se avisa en Detalles si el archivo no se podrá desplazar bien en el reproductor |
+| Navegador | **Bloqueador de anuncios/rastreadores** por host (contador por página); **marcadores ⭐**; **pestañas privadas** 🕵 (sin historial ni persistencia); **modo lector** 📖; **escaneo profundo** de medios de la página; **congelado** del estado de pestañas a partir de 5 |
+| Interfaz | Tema **AMOLED** (negro puro); **vista compacta** de la lista; **notificación con «Reanudar todo»** cuando hay pausadas; **portapapeles inteligente** (enlace copiado → ofrecer descargar) |
+| Gestión | Panel de **uso de almacenamiento** (mayores archivos, total, espacio libre); **mover descarga a otra carpeta** (SAF, copia+borra); **limpieza automática** de temporales de hace +48 h |
+| Seguridad | **Bloqueo con PIN** (guardado solo como SHA-256); **ocultar descargas de la galería** (.nomedia) |
+| Tamaño/RAM | **R8/minify + shrinkResources** activados (APK y memoria más pequeños); sin dependencias pesadas nuevas |
+
+### Notas de la 3.0.0
+- El PIN se pide al abrir la app; se desactiva desde Ajustes › Seguridad.
+- El bloqueador usa una lista compacta de hosts publicitarios y de rastreo;
+  **no** toca CDNs de video para no romper reproducciones.
+- Los subtítulos se concatenan cuando los segmentos son WebVTT planos; los
+  DASH con texto empaquetado en MP4 (wvtt) se avisan como no convertibles.
 
 ## Novedades de la 2.1.0
 

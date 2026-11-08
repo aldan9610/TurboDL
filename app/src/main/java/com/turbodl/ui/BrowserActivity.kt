@@ -62,23 +62,82 @@ class BrowserActivity : Activity() {
     inner class Tab(var url: String, var title: String) {
         var state: Bundle? = null
         var showHome: Boolean = url.isEmpty()
+        var priv: Boolean = false // pestaña privada: sin historial ni persistencia
     }
     private val tabs = ArrayList<Tab>()
     private var cur = 0
-
-    /** medios detectados: url -> item */
-    private class Detected(val url: String, val type: String) {
-        var info: MediaProbe.Info? = null
-        var probed = false
-    }
-    private val detected = LinkedHashMap<String, Detected>()
-    private var probing = false
+    private var blockedInPage = 0
+    private var readerMode = false
 
     companion object {
         private val MEDIA_RE = Regex(
             "\\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\\?|$)",
             RegexOption.IGNORE_CASE
         )
+
+        /**
+         * Bloqueador de anuncios/rastreadores por host (lista compacta de
+         * tokens; SIN CDNs de video para no romper reproducciones).
+         */
+        private val AD_HOSTS = arrayOf(
+            "doubleclick.net", "googlesyndication.com", "google-analytics.com",
+            "googletagmanager.com", "googletagservices.com", "adservice.google",
+            "pagead2", "admob", "graph.facebook.com/act", "an.facebook.com",
+            "adnxs.com", "adsystem.com", "amazon-adsystem.com", "adcolony.com",
+            "applovin.com", "chartboost.com", "vungle.com", "unityads.unity3d.com",
+            "taboola.com", "outbrain.com", "criteo.com", "criteo.net", "pubmatic.com",
+            "rubiconproject.com", "openx.net", "smartadserver.com", "casalemedia.com",
+            "scorecardresearch.com", "quantserve.com", "quantcast.com", "moatads.com",
+            "adform.net", "adroll.com", "bidswitch.net", "sharethrough.com",
+            "teads.tv", "yieldmo.com", "indexww.com", "spotxchange.com",
+            "semanticscholar.org/ads", "zedo.com", "adblade.com", "revcontent.com",
+            "mgid.com", "propellerads.com", "popads.net", "popcash.net",
+            "exoclick.com", "exosrv.com", "trafficjunky", "adsrvr.org",
+            "crashlytics.com/ads", "app-measurement.com", "firebaseio.com/~",
+            "analytics.tiktok.com", "ads.linkedin.com", "ads-twitter.com",
+            "ads.yahoo.com", "adtechus.com", "advertising.com", "advertising.r7.com"
+        )
+
+        private val READERS_JS = """
+        (function(){
+          var kill = 'img,video,audio,iframe,embed,object,svg,canvas,ins,aside,figure';
+          try { document.querySelectorAll(kill).forEach(function(e){ e.remove(); }); } catch(e){}
+          try {
+            var s = document.createElement('style');
+            s.textContent = 'img,video,iframe{display:none!important} *{max-width:100%!important}'+
+              'body{font-size:1.15em!important;line-height:1.6!important;max-width:46em!important;margin:auto!important}';
+            document.head.appendChild(s);
+          } catch(e){}
+        })();
+        """.trimIndent()
+
+        private val DEEP_SCAN_JS = """
+        (function(){
+          var M = /\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\?|$)/i;
+          var seen = {};
+          function send(u, t){
+            try {
+              if (!u || u.indexOf('data:') === 0 || u.indexOf('blob:') === 0) return;
+              u = new URL(u, location.href).href;
+              if (seen[u] || !M.test(u)) return; seen[u] = 1;
+              if (window.__tdlBridge) window.__tdlBridge.sniff(u, t);
+            } catch(e){}
+          }
+          try {
+            document.querySelectorAll('video,audio,source').forEach(function(e){
+              var u = e.currentSrc || e.src || e.getAttribute('data-src');
+              if (u) send(u, 'tag');
+            });
+            document.querySelectorAll('a[href]').forEach(function(e){
+              send(e.href, 'link');
+            });
+            document.querySelectorAll('[data-src],[data-video],[data-file]').forEach(function(e){
+              send(e.getAttribute('data-src') || e.getAttribute('data-video') || e.getAttribute('data-file'), 'attr');
+            });
+          } catch(e){}
+          return 1;
+        })();
+        """.trimIndent()
 
         private val DEFAULT_SITES = arrayOf(
             "YouTube|https://m.youtube.com",
@@ -168,6 +227,14 @@ class BrowserActivity : Activity() {
         """.trimIndent()
     }
 
+    /** medios detectados: url -> item */
+    private class Detected(val url: String, val type: String) {
+        var info: MediaProbe.Info? = null
+        var probed = false
+    }
+    private val detected = LinkedHashMap<String, Detected>()
+    private var probing = false
+
     inner class Bridge {
         @JavascriptInterface
         fun sniff(url: String, type: String) {
@@ -228,8 +295,13 @@ class BrowserActivity : Activity() {
         editUrl.setOnEditorActionListener { _, _, _ -> go(); true }
         setupHistoryBar()
 
+        readerMode = eng.sp.getBoolean("readerMode", false)
         restoreTabs()
         showHome(true)
+
+        // llegada directa con URL (p.ej. "abrir en navegador" desde el inicio)
+        val openUrl = intent?.getStringExtra("openUrl")
+        if (!openUrl.isNullOrEmpty()) load(openUrl)
     }
 
     private fun View.isVisible(): Boolean = visibility == View.VISIBLE
@@ -296,22 +368,41 @@ class BrowserActivity : Activity() {
 
     private fun showBrowserMenu(v: View) {
         val pm = PopupMenu(this, v)
+        val curTab = if (cur in tabs.indices) tabs[cur] else null
         pm.menu.add(0, 1, 0, "🔎 Buscador: ${Profiles.ENGINES[engineIndex()]}")
         pm.menu.add(0, 2, 1, "👤 Perfil: ${Profiles.name(eng.sp)}")
         pm.menu.add(0, 3, 2, if (desktopMode) "📱 Cambiar a modo móvil" else "🖥 Cambiar a modo escritorio")
         pm.menu.add(0, 9, 3, "🗂 Pestañas (${tabCount()}) · nueva")
-        pm.menu.add(0, 10, 4, "🕘 Historial de navegación")
-        pm.menu.add(0, 8, 5, "↻ Recargar página")
-        pm.menu.add(0, 4, 6, "🧹 Limpiar historial de búsqueda")
-        pm.menu.add(0, 5, 7, "🍪 Limpiar cookies y caché")
-        pm.menu.add(0, 7, 8, "📌 Añadir esta página a accesos")
+        pm.menu.add(0, 11, 4, "🕵 Nueva pestaña privada")
+        pm.menu.add(0, 10, 5, "🕘 Historial de navegación")
+        pm.menu.add(0, 12, 6, "⭐ Marcadores")
+        pm.menu.add(0, 13, 7, "⭐ Añadir esta página a marcadores")
+        pm.menu.add(0, 14, 8, if (readerMode) "📖 Modo lector: activado" else "📖 Modo lector")
+        pm.menu.add(0, 15, 9, "🔍 Escanear medios de esta página")
+        pm.menu.add(0, 16, 10, if (eng.sp.getBoolean("adblock", true))
+            "🛡 Bloqueador de anuncios: activado (${blockedInPage} aquí)" else "🛡 Bloqueador de anuncios: apagado")
+        pm.menu.add(0, 8, 11, "↻ Recargar página")
+        pm.menu.add(0, 4, 12, "🧹 Limpiar historial de búsqueda")
+        pm.menu.add(0, 5, 13, "🍪 Limpiar cookies y caché")
+        pm.menu.add(0, 7, 14, "📌 Añadir esta página a accesos")
         pm.setOnMenuItemClickListener { mi ->
             when (mi.itemId) {
                 1 -> showEngineMenu(v)
                 2 -> showProfileMenu(v)
                 3 -> toggleDesktop()
                 9 -> newTab("")
+                11 -> newTab("", privateTab = true)
                 10 -> showPageHistory()
+                12 -> showBookmarks()
+                13 -> { addBookmark(curTab?.url ?: "", web.title ?: ""); toast("Añadido a marcadores") }
+                14 -> toggleReader()
+                15 -> { inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") }
+                16 -> {
+                    val nv = !eng.sp.getBoolean("adblock", true)
+                    eng.sp.edit().putBoolean("adblock", nv).apply()
+                    toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
+                    web.reload()
+                }
                 8 -> { showHome(false); web.reload() }
                 4 -> { clearHistory(); toast("Historial de búsqueda borrado") }
                 5 -> clearPrivacy()
@@ -479,17 +570,26 @@ class BrowserActivity : Activity() {
         t.title = web.title ?: t.title
         t.showHome = homeOverlay.isVisible()
         try {
-            val b = Bundle()
-            if (web.saveState(b) != null) t.state = b else t.state = t.state
+            // congelado: a partir de 5 pestañas, el estado back/forward de las
+            // viejas se suelta (quedan por URL) para acotar la RAM
+            if (tabs.size <= 5) {
+                val b = Bundle()
+                if (web.saveState(b) != null) t.state = b else t.state = t.state
+            } else if (t.state != null && t.state!!.size() > 0) {
+                // conservar si ya existia; no crecer mas
+            }
         } catch (e: Exception) { }
     }
 
-    private fun newTab(url: String = "", switchNow: Boolean = true) {
+    private fun newTab(url: String = "", switchNow: Boolean = true, privateTab: Boolean = false) {
         if (tabs.size >= 8) { toast("Máximo 8 pestañas"); return }
         stashCurrent()
-        tabs.add(Tab(url, ""))
+        val nt = Tab(url, "")
+        nt.priv = privateTab
+        tabs.add(nt)
         if (switchNow) switchTab(tabs.size - 1)
         persistTabs()
+        if (privateTab) toast("Pestaña privada: no se guarda historial")
     }
 
     private fun closeTab(index: Int) {
@@ -557,7 +657,11 @@ class BrowserActivity : Activity() {
                 val v = TextView(this@BrowserActivity)
                 v.setPadding(pad, 30, pad, 30)
                 v.textSize = 13f
-                val mark = if (p == cur) "▶  " else "    "
+                val mark = when {
+                    p == cur -> "▶  "
+                    t.priv -> "🕵  "
+                    else -> "    "
+                }
                 val host = if (t.url.isEmpty()) "inicio" else (MediaProbe.hostOf(t.url) + " — " + t.title)
                 v.text = mark + host.take(70)
                 v.background = getDrawable(android.R.drawable.list_selector_background)
@@ -581,6 +685,10 @@ class BrowserActivity : Activity() {
         b("+ Nueva") {
             dlgRef[0]?.dismiss()
             newTab("")
+        }
+        b("+ Privada") {
+            dlgRef[0]?.dismiss()
+            newTab("", privateTab = true)
         }
         b("Cerrar todas") {
             dlgRef[0]?.dismiss()
@@ -610,18 +718,23 @@ class BrowserActivity : Activity() {
         dlg.show()
     }
 
-    /** Guarda la lista de pestañas (solo url/titulo; el estado vivo no cabe). */
+    /** Guarda la lista de pestañas (solo url/titulo; el estado vivo no cabe).
+     *  Las pestañas privadas no se persisten. */
     private fun persistTabs() {
         try {
             val arr = org.json.JSONArray()
-            for (t in tabs) {
+            var normalCur = 0
+            var normalIdx = 0
+            for ((i, t) in tabs.withIndex()) {
+                if (t.priv) { if (i < cur) normalIdx-- ; continue }
                 val o = org.json.JSONObject()
                 o.put("u", t.url)
                 o.put("t", t.title)
                 o.put("h", t.showHome)
                 arr.put(o)
             }
-            eng.sp.edit().putString("tabsV21", arr.toString()).putInt("tabsCur", cur).apply()
+            normalCur = (cur + normalIdx).coerceIn(0, if (arr.length() == 0) 0 else arr.length() - 1)
+            eng.sp.edit().putString("tabsV21", arr.toString()).putInt("tabsCur", normalCur).apply()
         } catch (e: Exception) { }
     }
 
@@ -797,6 +910,7 @@ class BrowserActivity : Activity() {
     private val client = object : WebViewClient() {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
             prog.visibility = View.VISIBLE
+            blockedInPage = 0
             if (url != null) {
                 editUrl.setText(url)
                 if (tabs.isNotEmpty() && url != "about:blank") tabs[cur].url = url
@@ -807,14 +921,17 @@ class BrowserActivity : Activity() {
         override fun onPageFinished(view: WebView?, url: String?) {
             prog.visibility = View.GONE
             inject()
+            if (readerMode) inject(READERS_JS)
             if (url != null && url.startsWith("http") && tabs.isNotEmpty()) {
                 val t = tabs[cur]
                 t.url = url
                 t.title = web.title ?: ""
                 t.showHome = false
                 updateTabButton()
-                // historial de paginas (capado a 500 en la base)
-                try { eng.db.addHistory(url, t.title) } catch (e: Exception) { }
+                // historial de paginas (las pestañas privadas no registran)
+                if (!t.priv) {
+                    try { eng.db.addHistory(url, t.title) } catch (e: Exception) { }
+                }
             }
         }
 
@@ -836,9 +953,18 @@ class BrowserActivity : Activity() {
         override fun shouldInterceptRequest(
             view: WebView?, request: WebResourceRequest?
         ): WebResourceResponse? {
-            val u = request?.url?.toString()
-            if (u != null && MEDIA_RE.containsMatchIn(u)) addDetected(u, "req")
-            return null // no interceptamos el contenido, solo lo observamos
+            val u = request?.url?.toString() ?: return null
+            if (MEDIA_RE.containsMatchIn(u)) addDetected(u, "req")
+            // bloqueador de anuncios/rastreadores (por host, lista compacta)
+            if (eng.sp.getBoolean("adblock", true)) {
+                val host = (request.url.host ?: "").lowercase(Locale.US)
+                if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
+                    blockedInPage++
+                    return WebResourceResponse(
+                        "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                }
+            }
+            return null
         }
     }
 
@@ -852,6 +978,97 @@ class BrowserActivity : Activity() {
 
     private fun inject() {
         try { web.evaluateJavascript(HOOK, null) } catch (e: Exception) { }
+    }
+
+    private fun inject(js: String) {
+        try { web.evaluateJavascript(js, null) } catch (e: Exception) { }
+    }
+
+    /** Modo lector: quita imagenes/videos y agranda el texto en esta y las proximas paginas. */
+    private fun toggleReader() {
+        readerMode = !readerMode
+        eng.sp.edit().putBoolean("readerMode", readerMode).apply()
+        if (readerMode) {
+            inject(READERS_JS)
+            toast("Modo lector activado (se aplica a las páginas que cargues)")
+        } else {
+            toast("Modo lector desactivado: recarga la página")
+        }
+    }
+
+    // ---------------- marcadores ----------------
+
+    private fun bookmarks(): ArrayList<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        try {
+            val arr = JSONArray(eng.sp.getString("bookmarks", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                out.add(o.optString("u", "") to o.optString("t", ""))
+            }
+        } catch (e: Exception) { }
+        return out
+    }
+
+    private fun addBookmark(url: String, title: String) {
+        if (!url.startsWith("http")) { toast("Página no válida"); return }
+        val list = bookmarks()
+        if (list.any { it.first == url }) { toast("Ya estaba en marcadores"); return }
+        if (list.size >= 100) { toast("Máximo 100 marcadores"); return }
+        val arr = JSONArray()
+        arr.put(JSONObject().put("u", url).put("t", title.ifEmpty { url }))
+        for ((u, t) in list) arr.put(JSONObject().put("u", u).put("t", t))
+        eng.sp.edit().putString("bookmarks", arr.toString()).apply()
+    }
+
+    /** Visor de marcadores: abrir (toque) o borrar (pulsacion larga). */
+    private fun showBookmarks() {
+        val rows = bookmarks()
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val lv = ListView(this)
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): Pair<String, String> = rows[p]
+            override fun getItemId(p: Int): Long = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val (u, t) = getItem(p)
+                val v = TextView(this@BrowserActivity)
+                v.setPadding(40, 26, 40, 26)
+                v.textSize = 13f
+                v.text = "${t.take(60)}\n${MediaProbe.hostOf(u)}"
+                v.background = getDrawable(android.R.drawable.list_selector_background)
+                return v
+            }
+        }
+        lv.adapter = adapter
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 640))
+        if (rows.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Sin marcadores. Añade páginas desde el menú ⋮"
+            empty.setPadding(40, 30, 40, 30)
+            lay.addView(empty, 0)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("⭐ Marcadores")
+            .setView(lay)
+            .setNegativeButton("Cerrar", null)
+            .create()
+        lv.setOnItemClickListener { _, _, p, _ ->
+            dlg.dismiss()
+            load(rows[p].first)
+        }
+        lv.setOnItemLongClickListener { _, _, p, _ ->
+            rows.removeAt(p)
+            val arr = JSONArray()
+            for ((u, t) in rows) arr.put(JSONObject().put("u", u).put("t", t))
+            eng.sp.edit().putString("bookmarks", arr.toString()).apply()
+            adapter.notifyDataSetChanged()
+            toast("Marcador eliminado")
+            true
+        }
+        dlg.show()
     }
 
     @Synchronized

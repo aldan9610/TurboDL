@@ -23,12 +23,24 @@ object Ui {
         "monospace" to "Monoespaciada"
     )
 
-    fun isDark(ctx: Context): Boolean =
-        ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).getBoolean("dark", false)
+    fun isDark(ctx: Context): Boolean = themeMode(ctx) >= 1
+
+    /** 0 = claro, 1 = oscuro, 2 = AMOLED (negro puro). */
+    fun themeMode(ctx: Context): Int =
+        ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).getInt("themeMode",
+            if (ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).getBoolean("dark", false)) 1 else 0)
 
     /** Llamar ANTES de setContentView. */
     fun theme(act: Activity) {
-        act.setTheme(if (isDark(act)) R.style.AppThemeDark else R.style.AppTheme)
+        act.setTheme(when (themeMode(act)) {
+            2 -> R.style.AppThemeAmoled
+            1 -> R.style.AppThemeDark
+            else -> R.style.AppTheme
+        })
+        if (themeMode(act) == 2) {
+            // barra de estado negra en AMOLED
+            try { act.window.statusBarColor = 0xFF000000.toInt() } catch (e: Exception) { }
+        }
     }
 
     fun fontScale(ctx: Context): Float {

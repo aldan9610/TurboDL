@@ -95,6 +95,10 @@ class HttpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             task.saveSegs()
             engine.db.update(task)
             sink0.close()
+            // verificacion rapida del MP4 terminado (indice moov)
+            if (fname.endsWith(".mp4", true) || fname.endsWith(".m4a", true)) {
+                Merge.validate(engine, task)
+            }
             engine.notifyChanged()
         } catch (e: Exception) {
             try { sink?.close() } catch (e2: Exception) { }

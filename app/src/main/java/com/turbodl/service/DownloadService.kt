@@ -41,6 +41,10 @@ class DownloadService : Service() {
                 stopGraceful()
                 return START_NOT_STICKY
             }
+            Engine.ACTION_RESUME_ALL -> {
+                eng.resumeAll()
+                return START_STICKY
+            }
             Engine.ACTION_STOP -> {
                 eng.pauseAll()
                 stopGraceful()

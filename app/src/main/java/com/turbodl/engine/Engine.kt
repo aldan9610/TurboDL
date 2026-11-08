@@ -56,6 +56,7 @@ class Engine(val ctx: Context) {
         const val CH = "downloads"
         // acciones de la notificacion / servicio
         const val ACTION_PAUSE_ALL = "com.turbodl.PAUSE_ALL"
+        const val ACTION_RESUME_ALL = "com.turbodl.RESUME_ALL"
         const val ACTION_STOP = "com.turbodl.STOP"
     }
 
@@ -63,6 +64,7 @@ class Engine(val ctx: Context) {
 
     fun init() {
         limiter.bytesPerSec = sp.getInt("limit", 0) * 1024L
+        EngineHolder.ua = userAgent()
         baseDir.mkdirs()
         cats.forEach { File(baseDir, it).mkdirs() }
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -72,13 +74,74 @@ class Engine(val ctx: Context) {
             nm?.createNotificationChannel(ch)
         }
         for (t in db.all()) tasks[t.id] = t
-        // tareas que quedaron a medias del ultimo arranque: en cola, no corriendo
+        // tareas que quedaron a medias del ultimo arranque: pausadas (reanudables
+        // desde donde quedaron); con auto-resumen activado se relanzan solas
+        val stale = ArrayList<Task>()
         synchronized(tasks) {
             for (t in tasks.values) if (t.state == St.RUNNING || t.state == St.MERGING) {
-                t.state = St.QUEUED; t.live = false; db.update(t)
+                t.state = St.PAUSED; t.live = false; db.update(t)
+                stale.add(t)
             }
         }
+        if (sp.getBoolean("autoResume", false)) {
+            for (t in stale) { t.state = St.QUEUED; db.update(t) }
+        }
+        cleanupTemp()
+        applyNoMedia()
         Thread { tickerLoop() }.apply { isDaemon = true }.start()
+    }
+
+    /** Borrar temporales de descargas interrumpidas con mas de 48 h. */
+    fun cleanupTemp() {
+        Thread {
+            try {
+                val limit = System.currentTimeMillis() - 48L * 3600 * 1000
+                val cache = ctx.cacheDir
+                cache.listFiles()?.forEach { f ->
+                    if (f.lastModified() < limit &&
+                        (f.name.startsWith("hls") || f.name.startsWith("dash") ||
+                         f.name.startsWith("merge_") || f.name.startsWith("norm_"))) {
+                        f.deleteRecursively()
+                    }
+                }
+                // pedazos sueltos de torrent abandonados
+                File(baseDir, cats[6]).listFiles()?.forEach { d ->
+                    if (d.isDirectory && d.name.startsWith("Torrent_") && d.lastModified() < limit) {
+                        val empty = d.listFiles()?.isEmpty() ?: true
+                        if (empty) d.delete()
+                    }
+                }
+            } catch (e: Exception) { }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** Ocultar la carpeta de descargas de la galeria (.nomedia). */
+    fun applyNoMedia() {
+        Thread {
+            try {
+                val f = File(baseDir, ".nomedia")
+                if (sp.getBoolean("noMedia", false)) {
+                    if (!f.exists()) f.createNewFile()
+                    cats.forEach { c -> File(File(baseDir, c), ".nomedia").createNewFile() }
+                } else {
+                    f.delete()
+                    cats.forEach { c -> File(File(baseDir, c), ".nomedia").delete() }
+                }
+            } catch (e: Exception) { }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** true si "solo Wi-Fi" esta activo y la red actual es de datos moviles. */
+    fun wifiBlocked(): Boolean {
+        if (!sp.getBoolean("soloWifi", false)) return false
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            @Suppress("DEPRECATION")
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            if (!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)) true
+            else caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED).not()
+        } catch (e: Exception) { false }
     }
 
     fun catDir(cat: Int): File = File(baseDir, cats[cat.coerceIn(0, cats.size - 1)])
@@ -233,32 +296,76 @@ class Engine(val ctx: Context) {
         synchronized(this) {
             if (active.containsKey(t.id) || t.state == St.RUNNING) return
             if (shuttingDown) return
+            if (t.state != St.MERGING && wifiBlocked()) {
+                // solo Wi-Fi activo y hay datos moviles: queda esperando
+                t.state = St.QUEUED
+                t.putExtra("wait", "esperando Wi-Fi (solo Wi-Fi activado)")
+                db.update(t)
+                notifyChanged()
+                return
+            }
+            t.putExtra("wait", "")
             t.state = St.RUNNING
             t.error = ""
             t.live = true
             db.update(t)
-            val dl: Downloader = when (t.kind) {
-                Kind.FTP -> FtpDownloader(t, this)
-                Kind.HLS -> HlsDownloader(t, this)
-                Kind.DASH -> DashDownloader(t, this)
-                Kind.TORRENT -> TorrentDownloader(t, this)
-                else -> HttpDownloader(t, this)
-            }
+            val dl: Downloader = newDownloader(t)
             t.tag = dl
             active[t.id] = dl
             taskPool.execute {
-                try {
-                    dl.run()
-                } catch (e: Exception) {
-                    t.state = St.ERROR
-                    t.error = e.message ?: "error"
-                    db.update(t)
-                } finally {
-                    synchronized(this@Engine) { active.remove(t.id) }
-                    t.live = false
-                    notifyChanged()
-                }
+                runWithRetries(t)
+                synchronized(this@Engine) { active.remove(t.id) }
+                t.live = false
+                notifyChanged()
             }
+            notifyChanged()
+        }
+    }
+
+    private fun newDownloader(t: Task): Downloader = when (t.kind) {
+        Kind.FTP -> FtpDownloader(t, this)
+        Kind.HLS -> HlsDownloader(t, this)
+        Kind.DASH -> DashDownloader(t, this)
+        Kind.TORRENT -> TorrentDownloader(t, this)
+        else -> HttpDownloader(t, this)
+    }
+
+    /**
+     * Ejecuta la tarea y, si falla, reintenta con espera progresiva
+     * (5s, 15s, 60s). El usuario puede pausar durante la espera.
+     */
+    private fun runWithRetries(t: Task) {
+        val maxRetries = sp.getInt("retries", 1).coerceIn(0, 3)
+        var attempt = 0
+        while (true) {
+            val dl = newDownloader(t)
+            t.tag = dl
+            synchronized(this) { active[t.id] = dl }
+            try {
+                dl.run()
+            } catch (e: Exception) {
+                t.state = St.ERROR
+                t.error = e.message ?: "error"
+                db.update(t)
+            }
+            if (t.state != St.ERROR || attempt >= maxRetries || shuttingDown) return
+            attempt++
+            val delay = longArrayOf(5, 15, 60)[(attempt - 1).coerceAtMost(2)]
+            t.state = St.QUEUED
+            t.error = ""
+            t.putExtra("wait", "reintento $attempt/$maxRetries en ${delay}s…")
+            db.update(t)
+            notifyChanged()
+            var waited = 0L
+            while (waited < delay * 1000) {
+                Thread.sleep(500)
+                waited += 500
+                if (shuttingDown || t.state != St.QUEUED) return // el usuario intervino
+            }
+            t.putExtra("wait", "")
+            t.state = St.RUNNING
+            t.live = true
+            db.update(t)
             notifyChanged()
         }
     }
@@ -400,7 +507,9 @@ class Engine(val ctx: Context) {
             }
             // planificador de cola: arranca la siguiente si hay hueco
             if (queued > 0 && running < maxConcurrent()) {
-                val next = snap.filter { it.state == St.QUEUED }.minByOrNull { it.time }
+                // saltar las que esperan Wi-Fi
+                val next = snap.filter { it.state == St.QUEUED && !wifiBlocked() }
+                    .minByOrNull { it.time }
                 if (next != null) startNow(next)
             }
             if (now - lastSave > 4000) {
@@ -443,9 +552,14 @@ class Engine(val ctx: Context) {
             ctx, 2, Intent(ctx, DownloadService::class.java).setAction(ACTION_STOP),
             piFlags(PendingIntent.FLAG_UPDATE_CURRENT)
         )
+        val resumePi = PendingIntent.getService(
+            ctx, 3, Intent(ctx, DownloadService::class.java).setAction(ACTION_RESUME_ALL),
+            piFlags(PendingIntent.FLAG_UPDATE_CURRENT)
+        )
 
         // tarea principal para un texto descriptivo
         val snap = synchronized(tasks) { tasks.values.toList() }
+        val pausedCount = snap.count { it.state == St.PAUSED }
         val top = snap.filter { it.state == St.RUNNING || it.state == St.MERGING }
             .maxByOrNull { it.done }
         val title = when {
@@ -484,6 +598,7 @@ class Engine(val ctx: Context) {
             if (pct >= 0) b.setProgress(100, pct, false)
         }
         if (running > 0) b.addAction(0, "⏸ Pausar todo", pausePi)
+        else if (pausedCount > 0) b.addAction(0, "⏵ Reanudar todo", resumePi)
         b.addAction(0, "✕ Detener servicio", stopPi)
         return b.build()
     }

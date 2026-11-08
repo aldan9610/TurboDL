@@ -42,10 +42,12 @@ class HlsDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             var url = task.url
             var p = M3u.parse(url, httpGetText(url))
             var masterAudio: String? = null
+            var masterSubs: String? = null
             if (p.master) {
                 if (p.audioUri != null && task.extra().optString("audioUrl", "").isEmpty()) {
                     masterAudio = p.audioUri // grupo de audio separado del master
                 }
+                if (p.subsUri != null) masterSubs = p.subsUri
                 val chosen = p.variants.firstOrNull { it.url == task.extra().optString("variantUrl", "") }
                     ?: p.variants.maxByOrNull { it.bandwidth }
                     ?: throw DlException("lista master sin variantes")
@@ -223,6 +225,12 @@ class HlsDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                         task.putExtra("note", "video TS con audio en archivo aparte (no combinable)")
                     }
                 }
+                // subtítulos del master (si los hay) y verificación del MP4
+                if (masterSubs != null) {
+                    val note = Subs.tryDownload(engine, task, masterSubs!!, null, task.url)
+                    if (note.isNotEmpty()) task.putExtra("note2", note)
+                }
+                if (isMp4) Merge.validate(engine, task)
             }
             engine.db.update(task)
             engine.notifyChanged()
