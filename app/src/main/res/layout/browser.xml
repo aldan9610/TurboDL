@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/primary"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <Button
+            android:id="@+id/btnBack"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="36dp"
+            android:layout_height="wrap_content"
+            android:text="&#8249;"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+
+        <Button
+            android:id="@+id/btnFwd"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="36dp"
+            android:layout_height="wrap_content"
+            android:text="&#8250;"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+
+        <AutoCompleteTextView
+            android:id="@+id/editUrl"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#FFFFFF"
+            android:hint="Buscar o escribir URL"
+            android:imeOptions="actionGo"
+            android:inputType="textUri"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp"
+            android:selectAllOnFocus="true"
+            android:textColor="#222222"
+            android:textColorHint="#888888"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btnGo"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="38dp"
+            android:layout_height="wrap_content"
+            android:text="&#10148;"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btnMore"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="38dp"
+            android:layout_height="wrap_content"
+            android:text="&#8942;"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+    </LinearLayout>
+
+    <ProgressBar
+        android:id="@+id/webProg"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:max="100"
+        android:visibility="gone" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/web"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <!-- pantalla de accesos directos (inicio) -->
+        <LinearLayout
+            android:id="@+id/homeOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="?android:attr/colorBackground"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="10dp"
+                android:text="Accesos directos  (mantén pulsado para quitar)"
+                android:textAppearance="?android:attr/textAppearanceSmall" />
+
+            <GridView
+                android:id="@+id/gridSites"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:numColumns="3"
+                android:horizontalSpacing="6dp"
+                android:verticalSpacing="6dp"
+                android:padding="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:padding="6dp">
+
+                <Button
+                    android:id="@+id/btnAddSite"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="&#10133; Añadir sitio"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnResetSites"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Restaurar"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bar"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <Button
+            android:id="@+id/btnVideos"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="&#11015; Detectados: 0"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnTabs"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="&#128194; 1"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btnHome"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="&#8962;"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/btnDesk"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="&#128421;"
+            android:textSize="14sp" />
+    </LinearLayout>
+</LinearLayout>

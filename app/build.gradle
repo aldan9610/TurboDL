@@ -1,0 +1,63 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.turbodl'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.turbodl"
+        // minSdk 21 = Android 5.0: la version minima util para WebView y SAF
+        minSdk 21
+        targetSdk 34
+        versionCode 3
+        versionName "2.1.0"
+        // Solo arquitecturas de telefonos reales (ahorro de tamano y RAM)
+        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('turbo.keystore')
+            storePassword 'turbodl2026'
+            keyAlias 'turbo'
+            keyPassword 'turbodl2026'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions { jvmTarget = '1.8' }
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "TurboDL-${variant.versionName}.apk"
+        }
+    }
+}
+
+dependencies {
+    // Todas las dependencias estan VENDIDAS en app/libs (compilacion offline):
+    //   kotlin-stdlib-1.9.24.jar / jlibtorrent-1.2.0.18.aar (BitTorrent, nativos en jniLibs)
+    //   isoparser-1.9.56.jar + slf4j-api-1.7.36.jar (fusion audio+video)
+    implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
+}

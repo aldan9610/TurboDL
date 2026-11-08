@@ -1,0 +1,12 @@
+Pruebas JVM de los analizadores puros (Mp4.java, M3u.java, Mpd.java).
+
+Linux/macOS (con JDK 8+):
+  python3 tests/mk_mp4.py /tmp/mp4tests
+  javac -d /tmp/ptest app/src/main/java/com/turbodl/util/Mp4.java \
+        app/src/main/java/com/turbodl/util/M3u.java \
+        app/src/main/java/com/turbodl/util/Mpd.java tests/ParserTest.java
+  java -cp /tmp/ptest ParserTest /tmp/mp4tests
+
+25 comprobaciones: duracion/resolucion MP4 (moov al inicio y al final),
+variantes HLS, audio separado, BYTERANGE, AES-KEY, MPD con timeline,
+calidades y deteccion de DRM.
