@@ -73,25 +73,55 @@
         android:max="100"
         android:visibility="gone" />
 
-    <!-- barra de pestañas: tarjetas mini con titulo y cerrar; aparece con 2+ pestañas -->
-    <HorizontalScrollView
-        android:id="@+id/tabsStripScroll"
+    <!-- barra de pestañas SIEMPRE visible: contador/switcher, tarjetas y nueva -->
+    <LinearLayout
+        android:id="@+id/tabsRow"
         android:layout_width="match_parent"
-        android:layout_height="38dp"
+        android:layout_height="40dp"
         android:background="@color/primary"
-        android:fillViewport="true"
-        android:scrollbars="none"
-        android:visibility="gone">
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-        <LinearLayout
-            android:id="@+id/tabsStrip"
+        <Button
+            android:id="@+id/btnTabCount"
+            style="?android:attr/borderlessButtonStyle"
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingLeft="6dp"
-            android:paddingRight="2dp" />
-    </HorizontalScrollView>
+            android:contentDescription="Conmutador de pestañas"
+            android:minWidth="44dp"
+            android:text="&#128194; 1"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+        <HorizontalScrollView
+            android:id="@+id/tabsStripScroll"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/tabsStrip"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingLeft="4dp"
+                android:paddingRight="2dp" />
+        </HorizontalScrollView>
+
+        <Button
+            android:id="@+id/btnNewTab"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:contentDescription="Nueva pestaña"
+            android:minWidth="40dp"
+            android:text="&#65291;"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+    </LinearLayout>
 
     <FrameLayout
         android:layout_width="match_parent"
@@ -172,14 +202,6 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="&#11015; Detectados: 0"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/btnTabs"
-            style="?android:attr/borderlessButtonStyle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="&#128194; 1"
             android:textSize="12sp" />
 
         <Button

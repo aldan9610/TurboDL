@@ -1,9 +1,17 @@
-# TurboDL 3.1.0
+# TurboDL 3.2.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.2.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Tira de pestañas | **Siempre visible arriba**, como un navegador de escritorio: fila fija `[🗂 n] [tarjetas…] [＋]`. El contador abre el conmutador en cuadrícula y **＋** crea una pestaña. Ya no hay nada de pestañas abajo: retirado el botón 🗂 de la barra inferior y las entradas de pestañas del menú (⋮) |
+| Gestos de swipe | **Arrastra una tarjeta en horizontal para cerrarla**: se desliza con desvanecido y se cierra al pasar el umbral (si no, vuelve a su sitio con animación). **Desliza hacia abajo sobre la tira** o sobre una tarjeta para **crear una pestaña nueva**, con aviso háptico |
+| Robustez | Los índices de las tarjetas se recalculan al actuar: cerrar varias seguidas no cierra la pestaña equivocada |
 
 ## Novedades de la 3.1.0
 

@@ -14,7 +14,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
@@ -57,7 +60,9 @@ class BrowserActivity : Activity() {
     private lateinit var editUrl: AutoCompleteTextView
     private lateinit var btnVideos: Button
     private lateinit var btnDesk: Button
-    private lateinit var btnTabs: Button
+    private lateinit var btnTabCount: Button
+    private lateinit var btnNewTab: Button
+    private lateinit var tabsRow: LinearLayout
     private lateinit var prog: ProgressBar
     private lateinit var homeOverlay: LinearLayout
     private lateinit var grid: GridView
@@ -271,7 +276,9 @@ class BrowserActivity : Activity() {
         editUrl = findViewById(R.id.editUrl)
         btnVideos = findViewById(R.id.btnVideos)
         btnDesk = findViewById(R.id.btnDesk)
-        btnTabs = findViewById(R.id.btnTabs)
+        btnTabCount = findViewById(R.id.btnTabCount)
+        btnNewTab = findViewById(R.id.btnNewTab)
+        tabsRow = findViewById(R.id.tabsRow)
         prog = findViewById(R.id.webProg)
         homeOverlay = findViewById(R.id.homeOverlay)
         grid = findViewById(R.id.gridSites)
@@ -289,7 +296,9 @@ class BrowserActivity : Activity() {
         findViewById<Button>(R.id.btnHome).setOnClickListener { showHome(!homeOverlay.isVisible()) }
         btnVideos.setOnClickListener { showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
-        btnTabs.setOnClickListener { showTabs() }
+        btnTabCount.setOnClickListener { showTabs() }
+        btnNewTab.setOnClickListener { newTab("") }
+        setStripSwipeNewTab(stripScroll)
         findViewById<Button>(R.id.btnMore).setOnClickListener { showBrowserMenu(it) }
         findViewById<Button>(R.id.btnAddSite).setOnClickListener { addSiteDialog() }
         findViewById<Button>(R.id.btnResetSites).setOnClickListener {
@@ -379,9 +388,6 @@ class BrowserActivity : Activity() {
         pm.menu.add(0, 1, 0, "🔎 Buscador: ${Profiles.ENGINES[engineIndex()]}")
         pm.menu.add(0, 2, 1, "👤 Perfil: ${Profiles.name(eng.sp)}")
         pm.menu.add(0, 3, 2, if (desktopMode) "📱 Cambiar a modo móvil" else "🖥 Cambiar a modo escritorio")
-        pm.menu.add(0, 9, 3, "🗂 Ver pestañas (${tabCount()})")
-        pm.menu.add(0, 17, 4, "➕ Nueva pestaña (primera fila)")
-        pm.menu.add(0, 11, 5, "🕵 Nueva pestaña privada")
         pm.menu.add(0, 10, 6, "🕘 Historial de navegación")
         pm.menu.add(0, 12, 7, "⭐ Marcadores")
         pm.menu.add(0, 13, 8, "⭐ Añadir esta página a marcadores")
@@ -398,9 +404,6 @@ class BrowserActivity : Activity() {
                 1 -> showEngineMenu(v)
                 2 -> showProfileMenu(v)
                 3 -> toggleDesktop()
-                9 -> showTabs()
-                17 -> newTab("")
-                11 -> newTab("", privateTab = true)
                 10 -> showPageHistory()
                 12 -> showBookmarks()
                 13 -> { addBookmark(curTab?.url ?: "", web.title ?: ""); toast("Añadido a marcadores") }
@@ -714,42 +717,30 @@ class BrowserActivity : Activity() {
     }
 
     private fun updateTabButton() {
-        btnTabs.text = "🗂 ${tabCount()}"
+        btnTabCount.text = "🗂 ${tabCount()}"
         if (cur in tabs.indices) {
             val t = tabs[cur]
-            btnTabs.contentDescription =
-                "Pestañas: ${t.title.ifEmpty { t.url.ifEmpty { "inicio" } }}"
+            btnTabCount.contentDescription =
+                "Pestañas: ${t.title.ifEmpty { t.url.ifEmpty { "inicio" } }}. Pulsa para verlas todas"
         }
     }
 
-    // ---------------- tira de pestañas (arriba) ----------------
+    // ---------------- tira de pestañas (arriba, siempre visible) ----------------
 
-    /** Mini-tarjetas con titulo y cerrar; visible a partir de 2 pestañas. */
+    /** Mini-tarjetas con titulo y cerrar; la fila [🗂n][tarjetas][＋] vive siempre arriba. */
     private fun renderStrip() {
         strip.removeAllViews()
-        if (tabs.size < 2) {
-            stripScroll.visibility = View.GONE
-            return
-        }
-        stripScroll.visibility = View.VISIBLE
-        tabs.forEachIndexed { i, t -> strip.addView(miniTabView(i, t)) }
-        val plus = TextView(this)
-        plus.text = "＋"
-        plus.textSize = 20f
-        plus.setPadding(dp(14), 0, dp(14), 0)
-        plus.setTextColor(Color.WHITE)
-        plus.setOnClickListener { newTab("") }
-        plus.contentDescription = "Nueva pestaña"
-        strip.addView(plus)
+        tabs.forEachIndexed { i, t -> strip.addView(miniTabView(t)) }
         strip.post {
             if (cur in tabs.indices) {
                 val v = strip.getChildAt(cur)
-                if (v != null) stripScroll.smoothScrollTo((v.left - dp(40)).coerceAtLeast(0), 0)
+                if (v != null) stripScroll.smoothScrollTo((v.left - dp(30)).coerceAtLeast(0), 0)
             }
         }
     }
 
-    private fun miniTabView(i: Int, t: Tab): View {
+    private fun miniTabView(t: Tab): View {
+        val i = tabs.indexOf(t)
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
@@ -773,24 +764,120 @@ class BrowserActivity : Activity() {
         x.setPadding(dp(8), 0, 0, 0)
         x.setTextColor(if (i == cur) 0xFF212121.toInt() else Color.WHITE)
         x.contentDescription = "Cerrar ${label.take(20)}"
-        x.setOnClickListener { closeTab(i) }
+        x.setOnClickListener { closeTab(tabs.indexOf(t)) }
         row.addView(x)
         val lp = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
         lp.marginEnd = dp(6)
         row.layoutParams = lp
-        row.setOnClickListener { switchTab(i) }
+        row.setOnClickListener { val j = tabs.indexOf(t); if (j >= 0) switchTab(j) }
         row.setOnLongClickListener {
+            val j = tabs.indexOf(t)
+            if (j < 0) return@setOnLongClickListener true
             AlertDialog.Builder(this)
                 .setTitle(label.take(40))
                 .setItems(arrayOf("✕ Cerrar pestaña", "🗐 Cerrar las demás")) { _, w ->
-                    if (w == 0) closeTab(i) else closeOthers(i)
+                    if (w == 0) closeTab(tabs.indexOf(t)) else closeOthers(tabs.indexOf(t))
                 }
                 .setNegativeButton("Cancelar", null)
                 .show()
             true
         }
+        setTabSwipeGestures(row, t)
         return row
+    }
+
+    /**
+     * Gestos sobre una tarjeta de la tira:
+     *  · arrastre horizontal -> la tarjeta se desliza y se cierra (estilo navegador)
+     *  · arrastre vertical hacia abajo -> nueva pestaña
+     */
+    private fun setTabSwipeGestures(v: View, t: Tab) {
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val downSwipe = dp(36)
+        var downX = 0f
+        var downY = 0f
+        var closeDrag = false
+        var created = false
+        v.setOnTouchListener { view, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.x; downY = ev.y
+                    closeDrag = false; created = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.x - downX
+                    val dy = ev.y - downY
+                    if (!closeDrag && !created && dy > downSwipe && Math.abs(dy) > Math.abs(dx)) {
+                        // swipe hacia abajo: crear pestaña
+                        created = true
+                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        newTab("")
+                        return@setOnTouchListener true
+                    }
+                    if (!closeDrag && !created &&
+                        Math.abs(dx) > slop && Math.abs(dx) > Math.abs(dy) * 1.2f) {
+                        closeDrag = true
+                        view.parent.requestDisallowInterceptTouchEvent(true)
+                        view.cancelLongPress()
+                    }
+                    if (closeDrag) {
+                        view.translationX = dx
+                        view.alpha = (1f - Math.abs(dx) / (view.width * 0.9f).coerceAtLeast(1f))
+                            .coerceIn(0.15f, 1f)
+                        true
+                    } else false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (created) {
+                        true
+                    } else if (closeDrag) {
+                        val w = view.width.coerceAtLeast(1)
+                        val away = Math.abs(view.translationX) > w * 0.45f
+                        if (away) {
+                            val dir = (if (view.translationX > 0) w else -w).toFloat()
+                            view.animate().translationX(dir).alpha(0f).setDuration(130)
+                                .withEndAction { closeTab(tabs.indexOf(t)) }
+                                .start()
+                        } else {
+                            view.animate().translationX(0f).alpha(1f).setDuration(130).start()
+                        }
+                        true
+                    } else false
+                }
+                else -> false
+            }
+        }
+    }
+
+    /** Swipe hacia abajo sobre el fondo de la tira (fuera de una tarjeta): nueva pestaña. */
+    private fun setStripSwipeNewTab(v: View) {
+        val downSwipe = dp(36)
+        var downY = 0f
+        var downX = 0f
+        var armed = true
+        v.setOnTouchListener { view, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downY = ev.y; downX = ev.x; armed = true; false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = ev.y - downY
+                    val dx = ev.x - downX
+                    if (armed && dy > downSwipe && Math.abs(dy) > Math.abs(dx)) {
+                        armed = false
+                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        newTab("")
+                        true
+                    } else false
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (!armed) { armed = true; true } else false
+                }
+                else -> false
+            }
+        }
     }
 
     private fun closeOthers(keep: Int) {
