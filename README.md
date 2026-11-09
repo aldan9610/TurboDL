@@ -1,9 +1,24 @@
-# TurboDL 3.0.0
+# TurboDL 3.1.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.1.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Pestañas | **Un WebView vivo por pestaña**: cambiar de pestaña es instantáneo y sin recargas; la página sigue su carga incluso en segundo plano. Límite de 8 |
+| Barra de pestañas | **Tira superior deslizable** (aparece con 2+ pestañas): mini-tarjetas con el título de la página, botón **×** para cerrar cada una y **＋** para crear; toque = cambiar, pulsación larga = cerrar / cerrar las demás |
+| Conmutador | Botón **🗂** abre el conmutador en **cuadrícula con miniaturas** de cada pestaña (captura real de la página), título, host y **✕** por tarjeta; botones «+ Nueva», «+ Privada» y «Cerrar todas» |
+| Enlaces | **Pulsación larga sobre un enlace** → abrir en **nueva pestaña (primera fila)**, en **segundo plano** 🌙 (con aviso), descargar o copiar. Enlaces `target=_blank` / `window.open` se abren en pestaña nueva automáticamente |
+| Ajustes | El contador del bloqueador de anuncios es **por pestaña**; «Recargar» y «Modo escritorio» se aplican a todas las pestañas abiertas |
+
+### Notas de la 3.1.0
+- Las pestañas se restauran entre sesiones (las privadas no).
+- El WebView de una pestaña se crea bajo demanda: abrir TurboDL sigue siendo
+  ligero aunque hubiera pestañas guardadas.
 
 ## Novedades de la 3.0.0
 

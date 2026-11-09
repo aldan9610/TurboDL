@@ -5,8 +5,15 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -22,7 +29,9 @@ import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
 import android.widget.BaseAdapter
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.GridView
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -45,7 +54,6 @@ import java.util.Locale
 
 class BrowserActivity : Activity() {
 
-    private lateinit var web: WebView
     private lateinit var editUrl: AutoCompleteTextView
     private lateinit var btnVideos: Button
     private lateinit var btnDesk: Button
@@ -53,21 +61,33 @@ class BrowserActivity : Activity() {
     private lateinit var prog: ProgressBar
     private lateinit var homeOverlay: LinearLayout
     private lateinit var grid: GridView
+    private lateinit var webHost: FrameLayout
+    private lateinit var stripScroll: HorizontalScrollView
+    private lateinit var strip: LinearLayout
     private val eng get() = App.app.engine
     private var desktopMode = false
 
-    // ---------------- pestañas (1 WebView vivo: bajo consumo) ----------------
+    // ---------------- pestañas (un WebView vivo por pestaña) ----------------
 
-    /** Estado ligero de una pestaña: url, titulo y back/forward del WebView. */
+    /** Pestaña: WebView propio (se crea bajo demanda), url, titulo y miniatura. */
     inner class Tab(var url: String, var title: String) {
-        var state: Bundle? = null
+        var wv: WebView? = null
         var showHome: Boolean = url.isEmpty()
         var priv: Boolean = false // pestaña privada: sin historial ni persistencia
+        var thumb: Bitmap? = null
+        var blocked: Int = 0
     }
     private val tabs = ArrayList<Tab>()
     private var cur = 0
-    private var blockedInPage = 0
     private var readerMode = false
+
+    /** WebView de la pestaña activa (todas las referencias antiguas siguen validas). */
+    private val web: WebView
+        get() {
+            val t = tabs[if (cur in tabs.indices) cur else 0]
+            return t.wv ?: ensureWv(t)
+        }
+    private fun activeWv(): WebView? = if (cur in tabs.indices) tabs[cur].wv else null
 
     companion object {
         private val MEDIA_RE = Regex(
@@ -248,7 +268,6 @@ class BrowserActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.browser)
         Ui.styleAll(findViewById(android.R.id.content))
-        web = findViewById(R.id.web)
         editUrl = findViewById(R.id.editUrl)
         btnVideos = findViewById(R.id.btnVideos)
         btnDesk = findViewById(R.id.btnDesk)
@@ -256,26 +275,13 @@ class BrowserActivity : Activity() {
         prog = findViewById(R.id.webProg)
         homeOverlay = findViewById(R.id.homeOverlay)
         grid = findViewById(R.id.gridSites)
+        webHost = findViewById(R.id.webHost)
+        stripScroll = findViewById(R.id.tabsStripScroll)
+        strip = findViewById(R.id.tabsStrip)
 
-        val ws = web.settings
-        ws.javaScriptEnabled = true
-        ws.domStorageEnabled = true
-        ws.mediaPlaybackRequiresUserGesture = false
-        ws.loadWithOverviewMode = true
-        ws.useWideViewPort = true
-        ws.cacheMode = WebSettings.LOAD_DEFAULT
         desktopMode = Profiles.isDesktop(eng.sp)
-        applyProfile(false)
 
         CookieManager.getInstance().setAcceptCookie(true)
-
-        web.addJavascriptInterface(Bridge(), "__tdlBridge")
-        web.webViewClient = client
-        web.webChromeClient = chrome
-
-        web.setDownloadListener { url, _, _, _, _ ->
-            askDownload(url, null)
-        }
 
         findViewById<Button>(R.id.btnBack).setOnClickListener { if (web.canGoBack()) web.goBack() }
         findViewById<Button>(R.id.btnFwd).setOnClickListener { if (web.canGoForward()) web.goForward() }
@@ -309,9 +315,10 @@ class BrowserActivity : Activity() {
     // ---------------- perfil de navegacion / escritorio ----------------
 
     private fun applyProfile(reload: Boolean) {
-        Ui.applyUa(web, eng.sp, desktopMode)
         btnDesk.alpha = if (desktopMode) 1f else 0.45f
         btnDesk.contentDescription = if (desktopMode) "Modo escritorio activado" else "Modo móvil"
+        // el UA se aplica a los WebView que ya existan (los nuevos lo heredan al crearse)
+        tabs.forEach { t -> t.wv?.let { Ui.applyUa(it, eng.sp, desktopMode) } }
         if (reload) {
             web.reload()
             toast(if (desktopMode) "Modo escritorio (vuelve a pulsar para móvil)"
@@ -372,25 +379,27 @@ class BrowserActivity : Activity() {
         pm.menu.add(0, 1, 0, "🔎 Buscador: ${Profiles.ENGINES[engineIndex()]}")
         pm.menu.add(0, 2, 1, "👤 Perfil: ${Profiles.name(eng.sp)}")
         pm.menu.add(0, 3, 2, if (desktopMode) "📱 Cambiar a modo móvil" else "🖥 Cambiar a modo escritorio")
-        pm.menu.add(0, 9, 3, "🗂 Pestañas (${tabCount()}) · nueva")
-        pm.menu.add(0, 11, 4, "🕵 Nueva pestaña privada")
-        pm.menu.add(0, 10, 5, "🕘 Historial de navegación")
-        pm.menu.add(0, 12, 6, "⭐ Marcadores")
-        pm.menu.add(0, 13, 7, "⭐ Añadir esta página a marcadores")
-        pm.menu.add(0, 14, 8, if (readerMode) "📖 Modo lector: activado" else "📖 Modo lector")
-        pm.menu.add(0, 15, 9, "🔍 Escanear medios de esta página")
-        pm.menu.add(0, 16, 10, if (eng.sp.getBoolean("adblock", true))
-            "🛡 Bloqueador de anuncios: activado (${blockedInPage} aquí)" else "🛡 Bloqueador de anuncios: apagado")
-        pm.menu.add(0, 8, 11, "↻ Recargar página")
-        pm.menu.add(0, 4, 12, "🧹 Limpiar historial de búsqueda")
-        pm.menu.add(0, 5, 13, "🍪 Limpiar cookies y caché")
-        pm.menu.add(0, 7, 14, "📌 Añadir esta página a accesos")
+        pm.menu.add(0, 9, 3, "🗂 Ver pestañas (${tabCount()})")
+        pm.menu.add(0, 17, 4, "➕ Nueva pestaña (primera fila)")
+        pm.menu.add(0, 11, 5, "🕵 Nueva pestaña privada")
+        pm.menu.add(0, 10, 6, "🕘 Historial de navegación")
+        pm.menu.add(0, 12, 7, "⭐ Marcadores")
+        pm.menu.add(0, 13, 8, "⭐ Añadir esta página a marcadores")
+        pm.menu.add(0, 14, 9, if (readerMode) "📖 Modo lector: activado" else "📖 Modo lector")
+        pm.menu.add(0, 15, 10, "🔍 Escanear medios de esta página")
+        pm.menu.add(0, 16, 11, if (eng.sp.getBoolean("adblock", true))
+            "🛡 Bloqueador de anuncios: activado (${curTab?.blocked ?: 0} aquí)" else "🛡 Bloqueador de anuncios: apagado")
+        pm.menu.add(0, 8, 12, "↻ Recargar página")
+        pm.menu.add(0, 4, 13, "🧹 Limpiar historial de búsqueda")
+        pm.menu.add(0, 5, 14, "🍪 Limpiar cookies y caché")
+        pm.menu.add(0, 7, 15, "📌 Añadir esta página a accesos")
         pm.setOnMenuItemClickListener { mi ->
             when (mi.itemId) {
                 1 -> showEngineMenu(v)
                 2 -> showProfileMenu(v)
                 3 -> toggleDesktop()
-                9 -> newTab("")
+                9 -> showTabs()
+                17 -> newTab("")
                 11 -> newTab("", privateTab = true)
                 10 -> showPageHistory()
                 12 -> showBookmarks()
@@ -401,7 +410,7 @@ class BrowserActivity : Activity() {
                     val nv = !eng.sp.getBoolean("adblock", true)
                     eng.sp.edit().putBoolean("adblock", nv).apply()
                     toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
-                    web.reload()
+                    tabs.forEach { it.wv?.reload() }
                 }
                 8 -> { showHome(false); web.reload() }
                 4 -> { clearHistory(); toast("Historial de búsqueda borrado") }
@@ -459,9 +468,13 @@ class BrowserActivity : Activity() {
             val cm = CookieManager.getInstance()
             cm.removeAllCookies(null)
             cm.flush()
-            web.clearCache(true)
-            web.clearFormData()
-            web.clearHistory()
+            tabs.forEach { t ->
+                t.wv?.let { w ->
+                    w.clearCache(true)
+                    w.clearFormData()
+                    w.clearHistory()
+                }
+            }
             toast("Cookies y caché borradas")
         } catch (e: Exception) {
             toast("No se pudo limpiar: ${e.message}")
@@ -496,17 +509,20 @@ class BrowserActivity : Activity() {
 
     private fun load(url: String) {
         homeOverlay.visibility = View.GONE
-        if (tabs.isNotEmpty()) {
-            tabs[cur].url = url
-            tabs[cur].showHome = false
-        }
-        web.loadUrl(url)
+        val t = tabs[if (cur in tabs.indices) cur else 0]
+        t.url = url
+        t.showHome = false
+        val w = ensureWv(t)
+        if (w.parent == null) attach(t)
+        w.loadUrl(url)
+        editUrl.setText(url)
+        renderStrip()
         persistTabs()
     }
 
     private fun showHome(show: Boolean) {
         homeOverlay.visibility = if (show) View.VISIBLE else View.GONE
-        if (tabs.isNotEmpty()) tabs[cur].showHome = show
+        if (cur in tabs.indices) tabs[cur].showHome = show
         if (show) {
             refreshSites()
             hideKb()
@@ -562,115 +578,265 @@ class BrowserActivity : Activity() {
 
     private fun tabCount(): Int = tabs.size
 
-    /** Guarda el estado del WebView en la pestaña activa. */
-    private fun stashCurrent() {
-        if (tabs.isEmpty()) return
+    private fun dp(v: Int): Int = Math.round(v * resources.displayMetrics.density)
+
+    /** Crea (si falta) el WebView de la pestaña con toda su configuracion. */
+    private fun ensureWv(t: Tab): WebView {
+        t.wv?.let { return it }
+        val w = WebView(this)
+        val ws = w.settings
+        ws.javaScriptEnabled = true
+        ws.domStorageEnabled = true
+        ws.mediaPlaybackRequiresUserGesture = false
+        ws.loadWithOverviewMode = true
+        ws.useWideViewPort = true
+        ws.cacheMode = WebSettings.LOAD_DEFAULT
+        Ui.applyUa(w, eng.sp, desktopMode)
+        w.addJavascriptInterface(Bridge(), "__tdlBridge")
+        w.webViewClient = client
+        w.webChromeClient = chrome
+        w.setDownloadListener { url, _, _, _, _ ->
+            askDownload(url, null)
+        }
+        // pulsacion larga sobre un enlace: abrir en primera fila o en segundo plano
+        w.setOnLongClickListener { v ->
+            val hr = (v as WebView).hitTestResult
+            val u = hr.extra
+            if (u != null && (hr.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                        hr.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE)) {
+                showLinkMenu(u)
+                true
+            } else false
+        }
+        if (t.url.isNotEmpty()) w.loadUrl(t.url)
+        t.wv = w
+        return w
+    }
+
+    private fun tabOf(wv: WebView?): Tab? = tabs.firstOrNull { it.wv === wv }
+
+    /** Muestra el WebView de la pestaña indicada y pausa el resto. */
+    private fun attach(t: Tab) {
+        val w = ensureWv(t)
+        webHost.removeAllViews()
+        webHost.addView(w, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        w.onResume()
+        tabs.forEach { o -> if (o !== t) o.wv?.onPause() }
+        homeOverlay.visibility = if (t.showHome && t.url.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    /** Copia al objeto Tab lo que el WebView activo tiene ahora mismo. */
+    private fun syncActive() {
+        if (cur !in tabs.indices) return
         val t = tabs[cur]
-        t.url = web.url ?: t.url
-        t.title = web.title ?: t.title
+        t.url = t.wv?.url ?: t.url
+        t.title = t.wv?.title ?: t.title
         t.showHome = homeOverlay.isVisible()
+    }
+
+    /** Miniatura de la pestaña para el conmutador (se captura al salir de ella). */
+    private fun grabThumb(t: Tab) {
+        val w = t.wv ?: return
+        if (w.width <= 0 || w.height <= 0) return
         try {
-            // congelado: a partir de 5 pestañas, el estado back/forward de las
-            // viejas se suelta (quedan por URL) para acotar la RAM
-            if (tabs.size <= 5) {
-                val b = Bundle()
-                if (web.saveState(b) != null) t.state = b else t.state = t.state
-            } else if (t.state != null && t.state!!.size() > 0) {
-                // conservar si ya existia; no crecer mas
-            }
+            val b = Bitmap.createBitmap(160, 240, Bitmap.Config.RGB_565)
+            val c = Canvas(b)
+            c.drawColor(Color.parseColor("#37474F"))
+            val s = 160f / w.width
+            c.scale(s, s)
+            w.draw(c)
+            t.thumb = b
         } catch (e: Exception) { }
     }
 
     private fun newTab(url: String = "", switchNow: Boolean = true, privateTab: Boolean = false) {
         if (tabs.size >= 8) { toast("Máximo 8 pestañas"); return }
-        stashCurrent()
+        syncActive()
         val nt = Tab(url, "")
         nt.priv = privateTab
         tabs.add(nt)
-        if (switchNow) switchTab(tabs.size - 1)
+        if (switchNow) {
+            cur = tabs.size - 1
+            attach(nt)
+            editUrl.setText(url)
+            hideKb()
+        } else {
+            // segundo plano: el WebView carga ya (detecta medios) sin robarte la vista
+            ensureWv(nt)
+            toast("Pestaña abierta en segundo plano")
+        }
+        renderStrip()
         persistTabs()
+        updateTabButton()
         if (privateTab) toast("Pestaña privada: no se guarda historial")
     }
 
     private fun closeTab(index: Int) {
         if (index < 0 || index >= tabs.size) return
-        val wasCurrent = index == cur
+        val wasActive = index == cur
+        tabs[index].let { t ->
+            t.wv?.let { w ->
+                try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+            }
+            t.thumb = null
+        }
         tabs.removeAt(index)
         if (tabs.isEmpty()) {
-            cur = 0
             tabs.add(Tab("", ""))
-            activateTab(0)
+            cur = 0
+            attach(tabs[0])
+            editUrl.setText("")
         } else {
-            if (cur >= tabs.size) cur = tabs.size - 1
-            if (wasCurrent) activateTab(cur)
+            if (index < cur) cur--
+            else if (wasActive) {
+                cur = index.coerceAtMost(tabs.size - 1)
+                attach(tabs[cur])
+                editUrl.setText(tabs[cur].url)
+            }
         }
+        renderStrip()
         persistTabs()
         updateTabButton()
+        toast("Pestaña cerrada")
     }
 
     private fun switchTab(index: Int) {
         if (index < 0 || index >= tabs.size || index == cur) return
-        stashCurrent()
+        syncActive()
+        grabThumb(tabs[cur])
         cur = index
-        activateTab(index)
+        attach(tabs[index])
+        editUrl.setText(tabs[index].url)
+        renderStrip()
         persistTabs()
-    }
-
-    /** Carga en el WebView el estado de la pestaña indicada. */
-    private fun activateTab(index: Int) {
-        val t = tabs[index]
-        web.stopLoading()
-        val st = t.state
-        var restored = false
-        if (st != null && st.size() > 0) {
-            try { restored = web.restoreState(st) != null } catch (e: Exception) { }
-        }
-        if (!restored) {
-            if (t.url.isNotEmpty()) web.loadUrl(t.url)
-        }
-        editUrl.setText(t.url)
-        homeOverlay.visibility = if (t.showHome && t.url.isEmpty()) View.VISIBLE else View.GONE
-        if (t.showHome && t.url.isNotEmpty() && !restored) homeOverlay.visibility = View.GONE
         updateTabButton()
     }
 
     private fun updateTabButton() {
         btnTabs.text = "🗂 ${tabCount()}"
-        if (cur in tabs.indices && tabs[cur].title.isNotEmpty() && tabs[cur].url.isNotEmpty()) {
-            btnTabs.contentDescription = "Pestañas: ${tabs[cur].title}"
+        if (cur in tabs.indices) {
+            val t = tabs[cur]
+            btnTabs.contentDescription =
+                "Pestañas: ${t.title.ifEmpty { t.url.ifEmpty { "inicio" } }}"
         }
     }
 
-    /** Conmutador de pestañas: abrir, cerrar (pulsación larga), nueva, limpiar. */
+    // ---------------- tira de pestañas (arriba) ----------------
+
+    /** Mini-tarjetas con titulo y cerrar; visible a partir de 2 pestañas. */
+    private fun renderStrip() {
+        strip.removeAllViews()
+        if (tabs.size < 2) {
+            stripScroll.visibility = View.GONE
+            return
+        }
+        stripScroll.visibility = View.VISIBLE
+        tabs.forEachIndexed { i, t -> strip.addView(miniTabView(i, t)) }
+        val plus = TextView(this)
+        plus.text = "＋"
+        plus.textSize = 20f
+        plus.setPadding(dp(14), 0, dp(14), 0)
+        plus.setTextColor(Color.WHITE)
+        plus.setOnClickListener { newTab("") }
+        plus.contentDescription = "Nueva pestaña"
+        strip.addView(plus)
+        strip.post {
+            if (cur in tabs.indices) {
+                val v = strip.getChildAt(cur)
+                if (v != null) stripScroll.smoothScrollTo((v.left - dp(40)).coerceAtLeast(0), 0)
+            }
+        }
+    }
+
+    private fun miniTabView(i: Int, t: Tab): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(10), dp(3), dp(8), dp(3))
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(14).toFloat()
+        bg.setColor(if (i == cur) Color.WHITE else 0x33FFFFFF)
+        row.background = bg
+        val tv = TextView(this)
+        tv.textSize = 12f
+        tv.setSingleLine(true)
+        tv.maxWidth = dp(100)
+        val label = (if (t.priv) "🕵 " else "") +
+            t.title.ifEmpty { if (t.url.isEmpty()) "Inicio" else MediaProbe.hostOf(t.url) }
+        tv.text = label
+        tv.setTextColor(if (i == cur) 0xFF212121.toInt() else Color.WHITE)
+        row.addView(tv)
+        val x = TextView(this)
+        x.text = "×"
+        x.textSize = 16f
+        x.setPadding(dp(8), 0, 0, 0)
+        x.setTextColor(if (i == cur) 0xFF212121.toInt() else Color.WHITE)
+        x.contentDescription = "Cerrar ${label.take(20)}"
+        x.setOnClickListener { closeTab(i) }
+        row.addView(x)
+        val lp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        lp.marginEnd = dp(6)
+        row.layoutParams = lp
+        row.setOnClickListener { switchTab(i) }
+        row.setOnLongClickListener {
+            AlertDialog.Builder(this)
+                .setTitle(label.take(40))
+                .setItems(arrayOf("✕ Cerrar pestaña", "🗐 Cerrar las demás")) { _, w ->
+                    if (w == 0) closeTab(i) else closeOthers(i)
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            true
+        }
+        return row
+    }
+
+    private fun closeOthers(keep: Int) {
+        for (i in tabs.indices.reversed()) if (i != keep) {
+            tabs[i].wv?.let { w ->
+                try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+            }
+            tabs[i].thumb = null
+            tabs.removeAt(i)
+        }
+        cur = 0
+        attach(tabs[0])
+        editUrl.setText(tabs[0].url)
+        renderStrip()
+        persistTabs()
+        updateTabButton()
+        toast("Solo queda 1 pestaña")
+    }
+
+    // ---------------- conmutador de pestañas (cuadricula con miniaturas) ----------------
+
+    /** Conmutador estilo navegador moderno: tarjetas con miniatura, cerrar y nueva. */
     private fun showTabs() {
-        stashCurrent()
-        val lay = LinearLayout(this)
-        lay.orientation = LinearLayout.VERTICAL
-        val lv = ListView(this)
+        syncActive()
+        if (cur in tabs.indices) grabThumb(tabs[cur])
+        val lv = GridView(this)
+        lv.numColumns = 2
+        lv.horizontalSpacing = dp(10)
+        lv.verticalSpacing = dp(10)
+        lv.setPadding(dp(10), dp(12), dp(10), dp(4))
         val adapter = object : BaseAdapter() {
             override fun getCount(): Int = tabs.size
             override fun getItem(p: Int): Tab = tabs[p]
             override fun getItemId(p: Int): Long = p.toLong()
             override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
                 val t = getItem(p)
-                val pad = 40
-                val v = TextView(this@BrowserActivity)
-                v.setPadding(pad, 30, pad, 30)
-                v.textSize = 13f
-                val mark = when {
-                    p == cur -> "▶  "
-                    t.priv -> "🕵  "
-                    else -> "    "
-                }
-                val host = if (t.url.isEmpty()) "inicio" else (MediaProbe.hostOf(t.url) + " — " + t.title)
-                v.text = mark + host.take(70)
-                v.background = getDrawable(android.R.drawable.list_selector_background)
-                return v
+                val card = (cv as? FrameLayout) ?: buildTabCard()
+                bindTabCard(card, p, t)
+                return card
             }
         }
         lv.adapter = adapter
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
         lay.addView(lv, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 600))
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(430)))
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         fun b(label: String, f: () -> Unit): Button {
@@ -692,11 +858,20 @@ class BrowserActivity : Activity() {
         }
         b("Cerrar todas") {
             dlgRef[0]?.dismiss()
+            tabs.forEach { t ->
+                t.wv?.let { w ->
+                    try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+                }
+                t.thumb = null
+            }
             tabs.clear()
             tabs.add(Tab("", ""))
             cur = 0
-            activateTab(0)
+            attach(tabs[0])
+            editUrl.setText("")
+            renderStrip()
             persistTabs()
+            updateTabButton()
         }
         lay.addView(row)
         val dlg = AlertDialog.Builder(this)
@@ -712,28 +887,121 @@ class BrowserActivity : Activity() {
         lv.setOnItemLongClickListener { _, _, p, _ ->
             dlg.dismiss()
             closeTab(p)
-            toast("Pestaña cerrada")
             true
         }
         dlg.show()
     }
 
-    /** Guarda la lista de pestañas (solo url/titulo; el estado vivo no cabe).
+    /** Tarjeta del conmutador: miniatura + titulo + host + boton cerrar. */
+    private fun buildTabCard(): FrameLayout {
+        val card = FrameLayout(this)
+        val pad = dp(8)
+        card.setPadding(pad, pad, pad, pad)
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(10).toFloat()
+        bg.setColor(0x1F888888)
+        card.background = bg
+        // miniatura
+        val img = ImageView(this)
+        img.id = android.R.id.icon
+        img.scaleType = ImageView.ScaleType.FIT_START
+        img.adjustViewBounds = false
+        card.addView(img, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        // franja inferior: titulo + host
+        val band = LinearLayout(this)
+        band.orientation = LinearLayout.VERTICAL
+        val bandLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM)
+        band.setPadding(dp(8), dp(4), dp(30), dp(6))
+        val title = TextView(this)
+        title.id = android.R.id.text1
+        title.textSize = 12f
+        title.setSingleLine(true)
+        val host = TextView(this)
+        host.id = android.R.id.text2
+        host.textSize = 10f
+        host.setSingleLine(true)
+        band.addView(title)
+        band.addView(host)
+        card.addView(band, bandLp)
+        // cerrar
+        val x = TextView(this)
+        x.id = android.R.id.button1
+        x.text = "✕"
+        x.textSize = 14f
+        x.setPadding(dp(8), dp(4), dp(8), dp(4))
+        val xLp = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.END)
+        card.addView(x, xLp)
+        return card
+    }
+
+    private fun bindTabCard(card: FrameLayout, p: Int, t: Tab) {
+        val img = card.findViewById<ImageView>(android.R.id.icon)
+        if (t.thumb != null && !t.thumb!!.isRecycled) {
+            img.setImageBitmap(t.thumb)
+            img.visibility = View.VISIBLE
+        } else {
+            img.setImageBitmap(null)
+            img.visibility = View.INVISIBLE
+        }
+        val title = card.findViewById<TextView>(android.R.id.text1)
+        val host = card.findViewById<TextView>(android.R.id.text2)
+        title.text = (if (t.priv) "🕵 " else "") + t.title.ifEmpty {
+            if (t.url.isEmpty()) "Inicio" else "Nueva pestaña"
+        }
+        host.text = t.url.ifEmpty { "página de inicio" }
+        val bg = GradientDrawable()
+        bg.cornerRadius = dp(10).toFloat()
+        bg.setColor(if (p == cur) 0x30FF6D00 else 0x1F888888)
+        if (p == cur) bg.setStroke(dp(2), 0xFFFF6D00.toInt())
+        card.background = bg
+        card.findViewById<TextView>(android.R.id.button1).setOnClickListener { closeTab(p) }
+    }
+
+    /** Menu de pulsacion larga sobre un enlace: primera fila o segundo plano. */
+    private fun showLinkMenu(url: String) {
+        val labels = arrayOf(
+            "🗂 Abrir en nueva pestaña (primera fila)",
+            "🌙 Abrir en segundo plano",
+            "⬇ Descargar este enlace",
+            "🔗 Copiar enlace")
+        AlertDialog.Builder(this)
+            .setTitle(MediaProbe.hostOf(url))
+            .setItems(labels) { _, which ->
+                when (which) {
+                    0 -> newTab(url, true)
+                    1 -> newTab(url, false)
+                    2 -> askDownload(url, null)
+                    3 -> {
+                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url))
+                        toast("Copiado")
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    /** Guarda la lista de pestañas (solo url/titulo; el WebView vivo no cabe).
      *  Las pestañas privadas no se persisten. */
     private fun persistTabs() {
         try {
             val arr = org.json.JSONArray()
-            var normalCur = 0
-            var normalIdx = 0
+            var shift = 0
             for ((i, t) in tabs.withIndex()) {
-                if (t.priv) { if (i < cur) normalIdx-- ; continue }
+                if (t.priv) { if (i < cur) shift--; continue }
                 val o = org.json.JSONObject()
                 o.put("u", t.url)
                 o.put("t", t.title)
                 o.put("h", t.showHome)
                 arr.put(o)
             }
-            normalCur = (cur + normalIdx).coerceIn(0, if (arr.length() == 0) 0 else arr.length() - 1)
+            val normalCur = (cur + shift).coerceIn(0, if (arr.length() == 0) 0 else arr.length() - 1)
             eng.sp.edit().putString("tabsV21", arr.toString()).putInt("tabsCur", normalCur).apply()
         } catch (e: Exception) { }
     }
@@ -751,14 +1019,22 @@ class BrowserActivity : Activity() {
         } catch (e: Exception) { }
         if (tabs.isEmpty()) tabs.add(Tab("", ""))
         cur = eng.sp.getInt("tabsCur", 0).coerceIn(0, tabs.size - 1)
-        activateTab(cur)
+        attach(tabs[cur])
+        editUrl.setText(tabs[cur].url)
+        renderStrip()
         updateTabButton()
     }
 
     override fun onPause() {
-        stashCurrent()
+        syncActive()
         persistTabs()
+        tabs.forEach { it.wv?.onPause() }
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (cur in tabs.indices) tabs[cur].wv?.onResume()
     }
 
     // ---------------- historial de paginas ----------------
@@ -909,29 +1185,37 @@ class BrowserActivity : Activity() {
 
     private val client = object : WebViewClient() {
         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-            prog.visibility = View.VISIBLE
-            blockedInPage = 0
-            if (url != null) {
-                editUrl.setText(url)
-                if (tabs.isNotEmpty() && url != "about:blank") tabs[cur].url = url
+            val t = tabOf(view) ?: return
+            val isActive = view === activeWv()
+            t.blocked = 0
+            if (url != null && url != "about:blank") {
+                t.url = url
+                if (isActive) {
+                    prog.visibility = View.VISIBLE
+                    editUrl.setText(url)
+                    homeOverlay.visibility = View.GONE
+                }
             }
-            homeOverlay.visibility = View.GONE
+            renderStrip()
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
-            prog.visibility = View.GONE
-            inject()
-            if (readerMode) inject(READERS_JS)
-            if (url != null && url.startsWith("http") && tabs.isNotEmpty()) {
-                val t = tabs[cur]
+            val t = tabOf(view) ?: return
+            val isActive = view === activeWv()
+            if (isActive) prog.visibility = View.GONE
+            injectOn(view)
+            if (readerMode) injectOn(view, READERS_JS)
+            if (url != null && url.startsWith("http")) {
                 t.url = url
-                t.title = web.title ?: ""
+                t.title = view?.title ?: t.title
                 t.showHome = false
                 updateTabButton()
+                renderStrip()
                 // historial de paginas (las pestañas privadas no registran)
                 if (!t.priv) {
                     try { eng.db.addHistory(url, t.title) } catch (e: Exception) { }
                 }
+                if (isActive) editUrl.setText(url)
             }
         }
 
@@ -959,7 +1243,8 @@ class BrowserActivity : Activity() {
             if (eng.sp.getBoolean("adblock", true)) {
                 val host = (request.url.host ?: "").lowercase(Locale.US)
                 if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
-                    blockedInPage++
+                    val t = tabOf(view)
+                    if (t != null) t.blocked++
                     return WebResourceResponse(
                         "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
                 }
@@ -970,9 +1255,39 @@ class BrowserActivity : Activity() {
 
     private val chrome = object : WebChromeClient() {
         override fun onProgressChanged(view: WebView?, newProgress: Int) {
-            prog.progress = newProgress
-            prog.visibility = if (newProgress in 1..99) View.VISIBLE else View.GONE
-            if (newProgress >= 90) inject()
+            if (view === activeWv()) {
+                prog.progress = newProgress
+                prog.visibility = if (newProgress in 1..99) View.VISIBLE else View.GONE
+            }
+            if (newProgress >= 90) injectOn(view)
+        }
+
+        /** target=_blank / window.open: nueva pestaña en primera fila. */
+        override fun onCreateWindow(
+            view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?
+        ): Boolean {
+            if (!isUserGesture) return false
+            val href = arrayOfNulls<String>(1)
+            val tmp = WebView(this@BrowserActivity)
+            tmp.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean {
+                    href[0] = r?.url?.toString() ?: href[0]
+                    return true
+                }
+            }
+            try {
+                (resultMsg!!.obj as WebView.WebViewTransport).setWebView(tmp)
+                resultMsg.sendToTarget()
+            } catch (e: Exception) {
+                return false
+            }
+            Handler(Looper.getMainLooper()).postDelayed({
+                val u = href[0] ?: tmp.url
+                try { tmp.destroy() } catch (e: Exception) { }
+                if (!u.isNullOrEmpty()) newTab(u, true)
+                else toast("El enlace no se pudo abrir en nueva pestaña")
+            }, 500)
+            return true
         }
     }
 
@@ -982,6 +1297,14 @@ class BrowserActivity : Activity() {
 
     private fun inject(js: String) {
         try { web.evaluateJavascript(js, null) } catch (e: Exception) { }
+    }
+
+    private fun injectOn(view: WebView?) {
+        try { view?.evaluateJavascript(HOOK, null) } catch (e: Exception) { }
+    }
+
+    private fun injectOn(view: WebView?, js: String) {
+        try { view?.evaluateJavascript(js, null) } catch (e: Exception) { }
     }
 
     /** Modo lector: quita imagenes/videos y agranda el texto en esta y las proximas paginas. */
@@ -1322,10 +1645,14 @@ class BrowserActivity : Activity() {
     }
 
     override fun onDestroy() {
-        try {
-            web.removeJavascriptInterface("__tdlBridge")
-            web.destroy()
-        } catch (e: Exception) { }
+        tabs.forEach { t ->
+            t.wv?.let { w ->
+                try {
+                    w.removeJavascriptInterface("__tdlBridge")
+                    w.destroy()
+                } catch (e: Exception) { }
+            }
+        }
         super.onDestroy()
     }
 
