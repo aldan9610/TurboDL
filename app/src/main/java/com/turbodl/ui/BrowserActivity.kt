@@ -101,6 +101,27 @@ class BrowserActivity : Activity() {
         )
 
         /**
+         * Grandes sitios cuyos medios NO llevan extension: los segmentos de
+         * YouTube (googlevideo/videoplayback) y las URLs de CDN de Facebook,
+         * TikTok, X/Twitter, Instagram, Reddit y Vimeo se detectan por host
+         * aunque la URL acabe en query. Tambien los manifiestos DASH de YouTube.
+         */
+        private val DETECT_RE = Regex(
+            "videoplayback|googlevideo\\.com|/api/manifest/dash|fbcdn\\.net|" +
+            "video\\.twimg\\.com|tiktokcdn|cdninstagram\\.com|v\\.redd\\.it|" +
+            "vimeo.*(progressive|\\.mp4)|manifest.*\\.mpd",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** Normaliza una URL sniffeada para deduplicar segmentos por rango. */
+        private fun normalizeSniffUrl(u: String): String {
+            if (!u.contains("videoplayback")) return u
+            return u.split('&')
+                .filter { !it.startsWith("range=") && !it.startsWith("rn=") && !it.startsWith("rbuf=") }
+                .joinToString("&")
+        }
+
+        /**
          * Bloqueador de anuncios/rastreadores por host (lista compacta de
          * tokens; SIN CDNs de video para no romper reproducciones).
          */
@@ -139,12 +160,13 @@ class BrowserActivity : Activity() {
         private val DEEP_SCAN_JS = """
         (function(){
           var M = /\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\?|$)/i;
+          var H = /videoplayback|googlevideo\.com|\/api\/manifest\/dash|fbcdn\.net|video\.twimg\.com|tiktokcdn|cdninstagram\.com|v\.redd\.it|vimeo.*progressive/i;
           var seen = {};
           function send(u, t){
             try {
               if (!u || u.indexOf('data:') === 0 || u.indexOf('blob:') === 0) return;
               u = new URL(u, location.href).href;
-              if (seen[u] || !M.test(u)) return; seen[u] = 1;
+              if (seen[u] || !(M.test(u) || H.test(u))) return; seen[u] = 1;
               if (window.__tdlBridge) window.__tdlBridge.sniff(u, t);
             } catch(e){}
           }
@@ -190,16 +212,17 @@ class BrowserActivity : Activity() {
             } catch(e){}
           }
           var M = /\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\?|$)/i;
+          var H = /videoplayback|googlevideo\.com|\/api\/manifest\/dash|fbcdn\.net|video\.twimg\.com|tiktokcdn|cdninstagram\.com|v\.redd\.it|vimeo.*progressive/i;
           var X = XMLHttpRequest.prototype.open;
           XMLHttpRequest.prototype.open = function(m, u){
-            try { if (u && (M.test(u) || /mpegurl|dash|f4m/i.test(u))) send(u, 'xhr'); } catch(e){}
+            try { if (u && (M.test(u) || H.test(u) || /mpegurl|dash|f4m/i.test(u))) send(u, 'xhr'); } catch(e){}
             return X.apply(this, arguments);
           };
           var F = window.fetch;
           if (F) window.fetch = function(u, o){
             try {
               var s = (typeof u === 'string') ? u : (u && u.url) || '';
-              if (s && (M.test(s) || /mpegurl|\.mpd(\?|$)/i.test(s))) send(s, 'fetch');
+              if (s && (M.test(s) || H.test(s) || /mpegurl|\.mpd(\?|$)/i.test(s))) send(s, 'fetch');
             } catch(e){}
             return F.apply(this, arguments);
           };
@@ -258,7 +281,8 @@ class BrowserActivity : Activity() {
         var probed = false
     }
     private val detected = LinkedHashMap<String, Detected>()
-    private var probing = false
+    private val uiH = Handler(Looper.getMainLooper())
+    private var liveAdapter: BaseAdapter? = null
 
     inner class Bridge {
         @JavascriptInterface
@@ -1325,7 +1349,8 @@ class BrowserActivity : Activity() {
             view: WebView?, request: WebResourceRequest?
         ): WebResourceResponse? {
             val u = request?.url?.toString() ?: return null
-            if (MEDIA_RE.containsMatchIn(u)) addDetected(u, "req")
+            if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
+                addDetected(normalizeSniffUrl(u), "req")
             // bloqueador de anuncios/rastreadores (por host, lista compacta)
             if (eng.sp.getBoolean("adblock", true)) {
                 val host = (request.url.host ?: "").lowercase(Locale.US)
@@ -1485,9 +1510,39 @@ class BrowserActivity : Activity() {
     private fun addDetected(url: String, type: String) {
         if (detected.size > 200) return
         if (detected.containsKey(url)) return
-        if (!Kit.isVideoOrAudio(url) && !url.contains("m3u8") && !url.contains(".mpd")) return
+        val keep = Kit.isVideoOrAudio(url) || url.contains("m3u8") ||
+            url.contains(".mpd") || url.contains("/api/manifest/dash") ||
+            DETECT_RE.containsMatchIn(url)
+        if (!keep) return
         detected[url] = Detected(url, type)
         btnVideos.text = "⬇ Detectados: ${detected.size}"
+        // sondeo automatico en background nada mas snifear: al abrir la
+        // lista la duracion/tamano ya estan resueltos (o llegan en vivo)
+        uiH.postDelayed({ kickProbes() }, 500)
+    }
+
+    /** Sonda en background de todo medio pendiente; 4 hilos concurrentes. */
+    private fun kickProbes() {
+        val pending = synchronized(detected) {
+            detected.values.filter { it.info == null && !it.probed }.toList()
+        }
+        if (pending.isEmpty()) return
+        val headers = HashMap<String, String>()
+        try {
+            headers["User-Agent"] = web.settings.userAgentString
+            val ck = CookieManager.getInstance().getCookie(web.url)
+            if (!ck.isNullOrBlank()) headers["Cookie"] = ck
+            val page = web.url
+            if (!page.isNullOrBlank()) headers["Referer"] = page
+        } catch (e: Exception) { }
+        for (d in pending) {
+            d.probed = true
+            MediaProbe.probe(d.url, headers) { info ->
+                d.info = info
+                // la lista abierta se refresca en vivo al llegar cada resultado
+                liveAdapter?.notifyDataSetChanged()
+            }
+        }
     }
 
     private fun pageHeaders(forUrl: String?): String {
@@ -1523,30 +1578,8 @@ class BrowserActivity : Activity() {
             toast("Aún no se detectan videos en esta página")
             return
         }
-        // lanzar sondeos pendientes (con cookies/referer de la pagina)
-        if (!probing) {
-            probing = true
-            val headers = HashMap<String, String>()
-            headers["User-Agent"] = web.settings.userAgentString
-            try {
-                val ck = CookieManager.getInstance().getCookie(web.url)
-                if (!ck.isNullOrBlank()) headers["Cookie"] = ck
-                val page = web.url
-                if (!page.isNullOrBlank()) headers["Referer"] = page
-            } catch (e: Exception) { }
-            val snapshot = detected.values.toList()
-            var pending = snapshot.count { it.info == null }
-            if (pending == 0) probing = false
-            for (d in snapshot) {
-                if (d.info != null) continue
-                MediaProbe.probe(d.url, headers) { info ->
-                    d.info = info
-                    d.probed = true
-                    pending--
-                    if (pending <= 0) probing = false
-                }
-            }
-        }
+        // relanzar sondeos pendientes (con cookies/referer de la pagina)
+        kickProbes()
 
         val dlgView = layoutInflater.inflate(R.layout.dialog_media, null)
         val lv = dlgView.findViewById<ListView>(R.id.mediaList)
@@ -1603,6 +1636,8 @@ class BrowserActivity : Activity() {
             .setNeutralButton("Cerrar", null)
             .create()
         dlgRef = dlg
+        liveAdapter = adapter
+        dlg.setOnDismissListener { if (dlgRef === dlg) liveAdapter = null }
         lv.setOnItemClickListener { _, _, p, _ ->
             val d = sortedDetected()[p]
             showMediaActions(dlg, d)

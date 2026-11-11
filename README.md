@@ -1,9 +1,26 @@
-# TurboDL 3.2.0
+# TurboDL 3.3.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.3.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Sondeo concurrente | La detección de **duración/tamaño arranca al snifear** (en background, 4 sondas en paralelo): al abrir la lista los datos ya están — y si no, la fila se **actualiza en vivo**. Antes solo sondeaba al abrir el diálogo, de uno en uno |
+| Sondeo rápido | Un MP4 se resuelve con **1 petición** (rango 256 KB que da tamaño, mime y `moov` a la vez; antes eran 2-4 conexiones). Las variantes HLS se resuelven **en paralelo** (8 peticiones simultáneas; testeado: 5 variantes en ~120 ms frente a ~4,5 s). Timeouts 12 s → 8 s |
+| YouTube | Las URLs `googlevideo.com/videoplayback` **traen duración y tamaño en sus propios parámetros** (`dur=`/`clen=`): duración, tamaño, calidad (`itag`) y «solo audio»/«sin audio» con **cero peticiones**. Detecta los manifiestos DASH de YouTube (`/api/manifest/dash`) |
+| Grandes sitios | Detección **por host además de por extensión** (`DETECT_RE`): Facebook (`fbcdn`), X/Twitter (`video.twimg`), TikTok (`tiktokcdn`), Instagram (`cdninstagram`), Reddit (`v.redd.it`), Vimeo — funcionan aunque la URL no termine en `.mp4` |
+| Deduplicación | Los segmentos de YouTube por rango (`range=0-…`, `rn`, `rbuf`) se normalizan: un vídeo = **1 ítem**, no decenas |
+
+### Verificación (harness JVM con los parsers reales del APK)
+- MP4: duración exacta 10 s y resolución 640×360 desde la cabecera, tamaño por `Content-Range` — 1 petición.
+- HLS: master + 5 variantes con duración en paralelo (119 ms).
+- DASH: duración 634 s y 10 representaciones.
+- googlevideo: `dur`/`clen` parseados; dos peticiones con distinto `range` → 1 ítem.
+- `DETECT_RE`: 8 casos reales (Facebook/X/Reddit/Vimeo/YouTube) sin falsos positivos.
 
 ## Novedades de la 3.2.0
 
