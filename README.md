@@ -1,9 +1,33 @@
-# TurboDL 3.3.0
+# TurboDL 3.4.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
-original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD).
+original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
+motor de bloqueo de anuncios en Rust vendido como AAR).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.4.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Bloqueador de anuncios | Motor **adblock-rust de Brave** (JNI nativo, vendido en `libs/adblock-0.1.3.aar`): EasyList + EasyPrivacy completas (~3,5 MB de reglas), **filtrado cosmético** (oculta los huecos de anuncios), scriptlets y `$redirect`. Cada comprobación es nativa (microsegundos). El motor se serializa a `engine.bin`: los arranques siguientes deserializan en milisegundos. Si el motor nativo fallara, cae a la lista compacta de hosts anterior. Ajustes → «Actualizar listas de filtros» descarga listas frescas de easylist.to |
+| Refresco de enlace caducado | Los CDNs firmados (YouTube/Facebook…) dan **403/410 al vencer la URL**. Ahora la tarea guarda la **página de origen**: al caducar se reabre la página en un **WebView oculto**, se recaptura el enlace (emparejando por itag/mime/extensión/host) con cookies renovadas y **reanuda desde el byte ya descargado** sobre el `.part`. Auto una vez + botón manual «🔄 Refrescar enlace» en el menú de la tarea (estilo 1DM) |
+| Pre-creación del archivo | Antes de descargar: **comprueba el espacio libre** (`usableSpace` vs tamaño+margen) y **pre-asigna el fichero** con su tamaño final (`setLength`), mostrando «creando archivo…». Sin más fallos de «sin espacio» a mitad de una descarga de 900 MB |
+| Botón de recarga | Icono **⟳ junto a la barra de direcciones** (donde estaba el menú): recarga con un toque; mientras la página carga pasa a **✕ = detener** |
+| Nueva pestaña en la cuadrícula | El conmutador de pestañas añade una **tarjeta «＋»** al final (pulsación larga: pestaña privada), además de la fila inferior |
+| Nombres descriptivos | Estilo yt-dlp: **«Sitio - Título.ext»** (p. ej. `Youtube - Mi Vacaciones en Cancun.mp4`) usando el título de la página que olfateó el medio (`document.title` capturado en el momento del sniffeo), sitio sacado de la página de **origen** (no del CDN), saneado y recortado. Antes: `videoplayback?itag=137…` |
+
+**Nota de requisitos:** minSdk pasa de 21 a **26 (Android 8.0)**, requisito del
+motor adblock-rust; Android 5.x–7.x ya no tiene WebView actualizable ni cuota
+relevante.
+
+### Integración técnica del bloqueador
+- AAR de Maven Central vendido offline; metadato `minCompileSdk` ajustado de 37
+  a 34 (el wrapper solo usa `android.net.Uri`, presente desde API 1).
+- El AAR trae metadatos de Kotlin 2.4 que el compilador 1.9 del proyecto no
+  lee: la integración (`AdBlockEngine.java`) está escrita en Java puro y el
+  AAR se reempaqueta sin `.kotlin_module`.
+- Reglas ProGuard añadidas para las entradas JNI (`org.mlm.adblock.**`).
 
 ## Novedades de la 3.3.0
 

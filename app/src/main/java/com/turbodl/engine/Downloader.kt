@@ -7,7 +7,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.GZIPInputStream
 
-class DlException(msg: String) : Exception(msg)
+open class DlException(msg: String) : Exception(msg)
 
 /**
  * Base de los descargadores. Aporta utilidades HTTP con las cabeceras

@@ -45,6 +45,7 @@ import android.widget.Toast
 import com.turbodl.App
 import com.turbodl.R
 import com.turbodl.db.Db
+import com.turbodl.engine.AdBlockEngine
 import com.turbodl.engine.MediaProbe
 import com.turbodl.model.Kind
 import com.turbodl.util.Kit
@@ -113,14 +114,6 @@ class BrowserActivity : Activity() {
             RegexOption.IGNORE_CASE
         )
 
-        /** Normaliza una URL sniffeada para deduplicar segmentos por rango. */
-        private fun normalizeSniffUrl(u: String): String {
-            if (!u.contains("videoplayback")) return u
-            return u.split('&')
-                .filter { !it.startsWith("range=") && !it.startsWith("rn=") && !it.startsWith("rbuf=") }
-                .joinToString("&")
-        }
-
         /**
          * Bloqueador de anuncios/rastreadores por host (lista compacta de
          * tokens; SIN CDNs de video para no romper reproducciones).
@@ -167,7 +160,7 @@ class BrowserActivity : Activity() {
               if (!u || u.indexOf('data:') === 0 || u.indexOf('blob:') === 0) return;
               u = new URL(u, location.href).href;
               if (seen[u] || !(M.test(u) || H.test(u))) return; seen[u] = 1;
-              if (window.__tdlBridge) window.__tdlBridge.sniff(u, t);
+              if (window.__tdlBridge) window.__tdlBridge.sniff(u, t, document.title || '');
             } catch(e){}
           }
           try {
@@ -208,7 +201,7 @@ class BrowserActivity : Activity() {
               if (!u || u.indexOf('data:') === 0 || u.indexOf('blob:') === 0) return;
               u = new URL(u, location.href).href;
               if (seen[u]) return; seen[u] = 1;
-              if (window.__tdlBridge) window.__tdlBridge.sniff(u, t || '');
+              if (window.__tdlBridge) window.__tdlBridge.sniff(u, t || '', document.title || '');
             } catch(e){}
           }
           var M = /\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\?|$)/i;
@@ -279,6 +272,7 @@ class BrowserActivity : Activity() {
     private class Detected(val url: String, val type: String) {
         var info: MediaProbe.Info? = null
         var probed = false
+        var pageTitle: String = "" // titulo de la página que lo olfateó
     }
     private val detected = LinkedHashMap<String, Detected>()
     private val uiH = Handler(Looper.getMainLooper())
@@ -286,8 +280,8 @@ class BrowserActivity : Activity() {
 
     inner class Bridge {
         @JavascriptInterface
-        fun sniff(url: String, type: String) {
-            runOnUiThread { addDetected(url, type) }
+        fun sniff(url: String, type: String, title: String) {
+            runOnUiThread { addDetected(url, type, title) }
         }
     }
 
@@ -314,9 +308,19 @@ class BrowserActivity : Activity() {
 
         CookieManager.getInstance().setAcceptCookie(true)
 
+        // motor de bloqueo de anuncios adblock-rust: carga EasyList+EasyPrivacy
+        // en segundo plano (deserializado rapido si ya se serializo antes)
+        AdBlockEngine.ensure(applicationContext)
+
         findViewById<Button>(R.id.btnBack).setOnClickListener { if (web.canGoBack()) web.goBack() }
         findViewById<Button>(R.id.btnFwd).setOnClickListener { if (web.canGoForward()) web.goForward() }
         findViewById<Button>(R.id.btnGo).setOnClickListener { go() }
+        findViewById<Button>(R.id.btnReload).setOnClickListener {
+            if (prog.visibility == View.VISIBLE) {
+                web.stopLoading()
+                toast("Carga detenida")
+            } else web.reload()
+        }
         findViewById<Button>(R.id.btnHome).setOnClickListener { showHome(!homeOverlay.isVisible()) }
         btnVideos.setOnClickListener { showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
@@ -933,10 +937,34 @@ class BrowserActivity : Activity() {
         lv.verticalSpacing = dp(10)
         lv.setPadding(dp(10), dp(12), dp(10), dp(4))
         val adapter = object : BaseAdapter() {
-            override fun getCount(): Int = tabs.size
-            override fun getItem(p: Int): Tab = tabs[p]
+            // ultima celda: tarjeta "+" para crear pestaña desde la cuadrícula
+            override fun getCount(): Int = tabs.size + 1
+            override fun getItem(p: Int): Tab = tabs[p.coerceAtMost(tabs.size - 1)]
             override fun getItemId(p: Int): Long = p.toLong()
             override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                if (p == tabs.size) {
+                    val card = FrameLayout(this@BrowserActivity)
+                    val pad = dp(8)
+                    card.setPadding(pad, pad, pad, pad)
+                    val bg = GradientDrawable()
+                    bg.cornerRadius = dp(10).toFloat()
+                    bg.setColor(0x334CAF50)
+                    card.background = bg
+                    val box = LinearLayout(this@BrowserActivity)
+                    box.orientation = LinearLayout.VERTICAL
+                    box.gravity = Gravity.CENTER
+                    val plus = TextView(this@BrowserActivity)
+                    plus.text = "＋"
+                    plus.textSize = 40f
+                    val lb = TextView(this@BrowserActivity)
+                    lb.text = "Nueva pestaña"
+                    lb.textSize = 12f
+                    box.addView(plus)
+                    box.addView(lb)
+                    card.addView(box, FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+                    return card
+                }
                 val t = getItem(p)
                 val card = (cv as? FrameLayout) ?: buildTabCard()
                 bindTabCard(card, p, t)
@@ -993,11 +1021,11 @@ class BrowserActivity : Activity() {
         dlgRef[0] = dlg
         lv.setOnItemClickListener { _, _, p, _ ->
             dlg.dismiss()
-            switchTab(p)
+            if (p == tabs.size) newTab("") else switchTab(p)
         }
         lv.setOnItemLongClickListener { _, _, p, _ ->
             dlg.dismiss()
-            closeTab(p)
+            if (p == tabs.size) newTab("", privateTab = true) else closeTab(p)
             true
         }
         dlg.show()
@@ -1316,6 +1344,11 @@ class BrowserActivity : Activity() {
             if (isActive) prog.visibility = View.GONE
             injectOn(view)
             if (readerMode) injectOn(view, READERS_JS)
+            // filtro cosmético del motor adblock: oculta huecos de anuncios
+            if (eng.sp.getBoolean("adblock", true) && url != null && url.startsWith("http")) {
+                val css = AdBlockEngine.cssFor(url)
+                if (css.isNotEmpty()) injectOn(view, cosmeticJs(css))
+            }
             if (url != null && url.startsWith("http")) {
                 t.url = url
                 t.title = view?.title ?: t.title
@@ -1350,11 +1383,19 @@ class BrowserActivity : Activity() {
         ): WebResourceResponse? {
             val u = request?.url?.toString() ?: return null
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
-                addDetected(normalizeSniffUrl(u), "req")
-            // bloqueador de anuncios/rastreadores (por host, lista compacta)
+                addDetected(Kit.normalizeSniffUrl(u), "req")
+            // bloqueador de anuncios: motor adblock-rust (EasyList + EasyPrivacy,
+            // cosmetico y scriptlets); si aun no esta listo o fallo, cae a la
+            // lista compacta de hosts que existia antes
             if (eng.sp.getBoolean("adblock", true)) {
                 val host = (request.url.host ?: "").lowercase(Locale.US)
-                if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
+                var block = false
+                if (AdBlockEngine.ready()) {
+                    block = AdBlockEngine.shouldBlock(view?.url ?: u, u, AdBlockEngine.typeOf(u))
+                } else if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
+                    block = true
+                }
+                if (block) {
                     val t = tabOf(view)
                     if (t != null) t.blocked++
                     return WebResourceResponse(
@@ -1370,6 +1411,9 @@ class BrowserActivity : Activity() {
             if (view === activeWv()) {
                 prog.progress = newProgress
                 prog.visibility = if (newProgress in 1..99) View.VISIBLE else View.GONE
+                // el icono de recarga pasa a "detener" mientras la página carga
+                findViewById<Button>(R.id.btnReload).text =
+                    if (newProgress in 1..99) "✕" else "⟳"
             }
             if (newProgress >= 90) injectOn(view)
         }
@@ -1401,6 +1445,14 @@ class BrowserActivity : Activity() {
             }, 500)
             return true
         }
+    }
+
+    /** JS idempotente que aplica el CSS cosmético (un solo <style> por página). */
+    private fun cosmeticJs(css: String): String {
+        val j = org.json.JSONObject.quote(css)
+        return "(function(){try{if(window.__tdlCosm)return;window.__tdlCosm=1;" +
+            "var s=document.createElement('style');s.textContent=$j;" +
+            "(document.head||document.documentElement).appendChild(s);}catch(e){}})();"
     }
 
     private fun inject() {
@@ -1507,7 +1559,7 @@ class BrowserActivity : Activity() {
     }
 
     @Synchronized
-    private fun addDetected(url: String, type: String) {
+    private fun addDetected(url: String, type: String, title: String = "") {
         if (detected.size > 200) return
         if (detected.containsKey(url)) return
         val keep = Kit.isVideoOrAudio(url) || url.contains("m3u8") ||
@@ -1515,6 +1567,7 @@ class BrowserActivity : Activity() {
             DETECT_RE.containsMatchIn(url)
         if (!keep) return
         detected[url] = Detected(url, type)
+        if (title.isNotBlank()) detected[url]?.pageTitle = title
         btnVideos.text = "⬇ Detectados: ${detected.size}"
         // sondeo automatico en background nada mas snifear: al abrir la
         // lista la duracion/tamano ya estan resueltos (o llegan en vivo)
@@ -1737,6 +1790,25 @@ class BrowserActivity : Activity() {
             "audio" -> 2
             else -> 0
         }
+        // titulo de la pagina que olfateo el medio (para "Sitio - Titulo")
+        val dInfo = synchronized(detected) { detected[url] }
+        val pageTitle = dInfo?.pageTitle?.takeIf { it.isNotBlank() }
+            ?: web.title?.takeIf { it.isNotBlank() } ?: ""
+        // extension: de la URL, del mime del sondeo o del tipo googlevideo
+        var ext = Kit.extOf(Kit.nameFromUrl(url))
+        if (ext.isEmpty()) {
+            val mime = dInfo?.info?.mimeType ?: ""
+            ext = when {
+                mime.contains("mp4") || mime.contains("quicktime") -> "mp4"
+                mime.contains("webm") -> "webm"
+                mime.contains("audio/mp4") -> "m4a"
+                mime.contains("mpegurl") -> "m3u8"
+                mime.contains("dash") -> "mpd"
+                url.contains("videoplayback") && url.contains("mime=audio") -> "m4a"
+                url.contains("videoplayback") -> "mp4"
+                else -> ""
+            }
+        }
         var extra = variantExtra
         if (extra != null) {
             val o = JSONObject(extra)
@@ -1749,7 +1821,17 @@ class BrowserActivity : Activity() {
             }
             extra = o.toString()
         }
-        eng.add(url, "", kind, cat, eng.sp.getInt("conns", 4), headers, enqueue, extra) {
+        // guardar la página de origen: permite refrescar el enlace si caduca
+        val o2 = if (extra != null) JSONObject(extra) else JSONObject()
+        val origin = web.url?.takeIf { it.startsWith("http") } ?: ""
+        if (origin.isNotEmpty()) o2.put("origin", origin)
+        if (pageTitle.isNotBlank()) o2.put("ptitle", pageTitle)
+        extra = o2.toString()
+        // nombre "Sitio - Titulo": el sitio sale de la página de origen
+        // (Youtube, Facebook...), no del CDN donde vive el archivo
+        val finalName = if (pageTitle.isNotBlank())
+            Kit.suggestName(pageTitle, url, ext, origin.ifEmpty { url }) else ""
+        eng.add(url, finalName, kind, cat, eng.sp.getInt("conns", 4), headers, enqueue, extra) {
             if (it != null) {
                 toast(if (enqueue) "En cola: ${it.name}" else "Descargando: ${it.name}")
                 val i = android.content.Intent(this, com.turbodl.service.DownloadService::class.java)

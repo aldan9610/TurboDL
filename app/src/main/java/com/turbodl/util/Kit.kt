@@ -143,6 +143,54 @@ object Kit {
         }
     }
 
+    /**
+     * Normaliza una URL sniffeada para deduplicar segmentos: quita los
+     * parametros de rango/peticion de googlevideo (range, rn, rbuf) de modo
+     * que todos los fragmentos del mismo stream dan la misma URL.
+     */
+    fun normalizeSniffUrl(u: String): String {
+        if (!u.contains("videoplayback")) return u
+        return u.split('&')
+            .filter { !it.startsWith("range=") && !it.startsWith("rn=") && !it.startsWith("rbuf=") }
+            .joinToString("&")
+    }
+
+    /** Host limpio y legible: "m.youtube.com" -> "Youtube"; "scontent.xx.fbcdn.net" -> "Fbcdn" */
+    fun siteLabel(url: String): String {
+        val h = try { java.net.URI(url).host ?: "" } catch (e: Exception) { "" }
+        val labels = h.split('.').filter { it.isNotEmpty() }
+        if (labels.isEmpty()) return "Web"
+        // dominio de segundo nivel (con co.uk/comm.mx y similares: el tercero)
+        var idx = labels.size - 2
+        if (idx > 0 && labels[idx] in GENERIC_TLD && idx - 1 >= 0) idx -= 1
+        val base = labels[idx].replace(Regex("[^a-z0-9]+", RegexOption.IGNORE_CASE), "")
+        return base.replaceFirstChar { c -> c.uppercaseChar() }.ifEmpty { "Web" }
+    }
+
+    private val GENERIC_TLD = setOf("co", "com", "net", "org", "gov", "edu")
+
+    /**
+     * Nombre de archivo descriptivo "Sitio - Título" (estilo yt-dlp) a partir
+     * del titulo de la página. El sitio se saca de la página de ORIGEN
+     * (siteUrl; p. ej. youtube.com, no googlevideo.com); si no hay, de la URL
+     * del medio. Quita sufijos de sitio (" - YouTube", " | Facebook"),
+     * caracteres ilegales y recorta.
+     */
+    fun suggestName(title: String, url: String, ext: String, siteUrl: String = url): String {
+        val limpio = title
+            .replace(Regex("\\s*[|\\-–—:]\\s*(YouTube|Facebook|Instagram|X|Twitter|TikTok|Reddit|Vimeo|Pinterest)\\s*$", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("[\\\\/:*?\"<>|\\n\\r\\t]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(80)
+            .trim(' ', '-', '.', '·')
+        val base = if (limpio.isNotEmpty()) limpio else nameFromUrl(url).substringBeforeLast('.')
+        val sitio = siteLabel(siteUrl)
+        val nombre = if (sitio.isNotEmpty() && sitio != "Web" && !base.equals(sitio, true))
+            "$sitio - $base" else base
+        return if (ext.isNotEmpty()) "$nombre.$ext" else nombre
+    }
+
     /** SHA-256 hex (para guardar el PIN sin guardarlo en claro). */
     fun sha256(text: String): String {
         val d = java.security.MessageDigest.getInstance("SHA-256")

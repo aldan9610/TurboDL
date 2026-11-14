@@ -9,11 +9,13 @@ android {
 
     defaultConfig {
         applicationId "com.turbodl"
-        // minSdk 21 = Android 5.0: la version minima util para WebView y SAF
-        minSdk 21
+        // minSdk 26 = Android 8.0: requisito del motor de bloqueo de anuncios
+        // adblock-rust (libs/adblock-0.1.3.aar); Android 5.x-7.x ya no tiene
+        // WebView actualizable ni cuota relevante
+        minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName "3.3.0"
+        versionCode 8
+        versionName "3.4.0"
         // Solo arquitecturas de telefonos reales (ahorro de tamano y RAM)
         ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
     }

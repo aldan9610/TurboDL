@@ -449,6 +449,8 @@ class MainActivity : Activity() {
             labels.add("📂 Abrir archivo")
             labels.add("📤 Mover a otra carpeta")
         }
+        if (t.extra().optString("origin", "").isNotEmpty() &&
+            (t.state == St.ERROR || t.state == St.PAUSED)) labels.add("🔄 Refrescar enlace (reabrir la página y reanudar)")
         labels.add("🔗 Copiar enlace")
         labels.add("ℹ Detalles")
         labels.add("🗑 Eliminar")
@@ -469,6 +471,12 @@ class MainActivity : Activity() {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         cm.setPrimaryClip(ClipData.newPlainText("url", t.url))
                         toast("Enlace copiado")
+                    }
+                    "🔄 Refrescar enlace (reabrir la página y reanudar)" -> {
+                        // manual: permite reintentar aunque el auto ya falló
+                        t.putExtra("refrescoAuto", false)
+                        eng.requestLinkRefresh(t, manual = true)
+                        maybeStartService()
                     }
                     "ℹ Detalles" -> showDetails(t)
                     "🗑 Eliminar" -> confirmDelete(t)

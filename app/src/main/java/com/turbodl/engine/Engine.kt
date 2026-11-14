@@ -241,7 +241,8 @@ class Engine(val ctx: Context) {
                 if (extraJson != null && extraJson.isNotEmpty()) t.extraJson = extraJson
                 t.putExtra("conns", conns)
                 t.putExtra("cat", cat)
-                t.name = if (name.isNotEmpty()) name else Kit.nameFromUrl(real)
+                val explicitName = name.isNotEmpty()
+                t.name = if (explicitName) name else Kit.nameFromUrl(real)
 
                 // carpeta de destino segun modo (app propia o arbol SAF)
                 val wantSaf = usingSaf() && kind != Kind.TORRENT
@@ -259,14 +260,20 @@ class Engine(val ctx: Context) {
                         val p = HttpDownloader.probe(t, this)
                         t.url = p.finalUrl
                         t.total = p.total
-                        t.fileName = if (wantSaf) p.fileName else Kit.uniqueName(t.dir, p.fileName)
-                        t.name = t.fileName
+                        if (explicitName) {
+                            // nombre descriptivo dado por el sniffer ("Sitio - Titulo"):
+                            // se conserva aunque el sondeo encuentre otro en la URL
+                            t.fileName = if (wantSaf) t.name else Kit.uniqueName(t.dir, t.name)
+                        } else {
+                            t.fileName = if (wantSaf) p.fileName else Kit.uniqueName(t.dir, p.fileName)
+                            t.name = t.fileName
+                        }
                         t.putExtra("ranges", p.ranges)
                     } catch (e: Exception) {
                         t.error = "sondeo: ${e.message}"
                     }
                 } else if (kind == Kind.TORRENT) {
-                    t.name = if (name.isNotEmpty()) name else "Torrent"
+                    t.name = if (explicitName) t.name else "Torrent"
                     t.fileName = ""
                     t.dir = File(catDir(cat), "Torrent_" + System.currentTimeMillis()).absolutePath
                 } else if (kind == Kind.HLS) {
@@ -390,6 +397,52 @@ class Engine(val ctx: Context) {
         t.live = false
         db.update(t)
         notifyChanged()
+    }
+
+    // ---------------- refresco de enlace caducado ----------------
+
+    private val refreshing = HashSet<Long>()
+
+    /**
+     * Reabre la página de origen en un WebView oculto, recaptura el enlace
+     * fresco y reanuda la descarga desde el byte ya descargado (el .part y
+     * los segmentos se conservan). Estilo 1DM; auto y manual.
+     */
+    fun requestLinkRefresh(t: Task, manual: Boolean = false) {
+        val origin = t.extra().optString("origin", "")
+        if (origin.isEmpty()) {
+            if (manual) toast("Esta tarea no guarda página de origen")
+            return
+        }
+        if (!refreshing.add(t.id)) return
+        t.state = St.QUEUED
+        t.live = false
+        t.error = ""
+        t.putExtra("wait", if (manual) "refrescando enlace…" else "enlace caducado: refrescando…")
+        db.update(t)
+        notifyChanged()
+        toast(if (manual) "Refrescando enlace…"
+        else "Enlace caducado: reabriendo la página de origen…")
+        LinkRefresher.refresh(this, t, origin) { ok, msg ->
+            refreshing.remove(t.id)
+            if (ok) {
+                t.putExtra("wait", "")
+                db.update(t)
+                toast("Enlace refrescado: reanudando desde ${Kit.fmtBytes(t.done)}")
+                if (wifiBlocked()) {
+                    t.state = St.QUEUED
+                    db.update(t)
+                    notifyChanged()
+                } else startNow(t)
+            } else {
+                t.state = St.ERROR
+                t.error = "no se pudo refrescar el enlace: $msg"
+                t.putExtra("wait", "")
+                db.update(t)
+                notifyChanged()
+                toast("No se pudo refrescar el enlace: $msg")
+            }
+        }
     }
 
     fun resumeAll() {

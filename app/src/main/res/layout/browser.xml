@@ -56,6 +56,16 @@
             android:textSize="14sp" />
 
         <Button
+            android:id="@+id/btnReload"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="38dp"
+            android:layout_height="wrap_content"
+            android:contentDescription="Recargar o detener la página"
+            android:text="&#10227;"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+
+        <Button
             android:id="@+id/btnMore"
             style="?android:attr/borderlessButtonStyle"
             android:layout_width="38dp"

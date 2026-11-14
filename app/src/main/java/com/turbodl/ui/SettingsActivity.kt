@@ -64,6 +64,7 @@ class SettingsActivity : Activity() {
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
         row("🛡 Bloqueador de anuncios",
             if (eng.sp.getBoolean("adblock", true)) "activado" else "desactivado") { toggleAdblock() }
+        row("🔄 Actualizar listas de filtros (EasyList + EasyPrivacy)", adblockText()) { updateFilterLists() }
         row("🖥 Modo escritorio por defecto",
             if (eng.sp.getBoolean("deskDefault", false)) "activado" else "desactivado") { toggleDesk() }
         row("🧹 Limpiar historial de búsqueda", "") { clearHistory() }
@@ -89,15 +90,29 @@ class SettingsActivity : Activity() {
 
         header("Acerca de")
         val about = TextView(this)
-        about.text = "TurboDL 3.0.0 · gestor de descargas multipropósito\n" +
+        about.text = "TurboDL 3.4.0 · gestor de descargas multipropósito\n" +
                 "HTTP multihilo · FTP · HLS · DASH · BitTorrent · subtítulos · " +
-                "reproductor interno · navegador con pestañas, marcadores y adblock\n" +
-                "Funciona desde Android 5.0 (API 21). Pensado para equipos de " +
+                "reproductor interno · navegador con pestañas, marcadores y adblock-rust\n" +
+                "Requiere Android 8.0 (API 26). Pensado para equipos de " +
                 "1 GB de RAM: sin AndroidX, pool de hilos acotado y WebView único.\n" +
                 "Gratis, sin anuncios ni suscripciones."
         about.textSize = 12f
         about.setPadding(50, 8, 50, 8)
         root.addView(about)
+    }
+
+    private fun updateFilterLists() {
+        toast("Actualizando listas de filtros…")
+        com.turbodl.engine.AdBlockEngine.updateLists(this) { ok, msg ->
+            toast(if (ok) "Listas actualizadas: $msg" else "No se pudo actualizar: $msg")
+            buildUi()
+        }
+    }
+
+    private fun adblockText(): String = when {
+        com.turbodl.engine.AdBlockEngine.ready() -> "motor Rust activo (EasyList + EasyPrivacy)"
+        com.turbodl.engine.AdBlockEngine.caido() -> "motor no disponible: lista básica de hosts"
+        else -> "cargando motor…"
     }
 
     private fun header(t: String) {

@@ -5,6 +5,7 @@ import com.turbodl.model.St
 import com.turbodl.model.Task
 import com.turbodl.util.Kit
 import org.json.JSONObject
+import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.util.concurrent.Executors
@@ -16,6 +17,9 @@ class Probe {
     var fileName: String = ""
     var finalUrl: String = ""
 }
+
+/** Enlace firmado que vencio (401/403/410): no se reintenta, se refresca. */
+class LinkExpired(msg: String) : DlException(msg)
 
 class HttpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
 
@@ -68,15 +72,28 @@ class HttpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                 }
             }
             task.fileName = fname
+            // fase "creando archivo": comprobar espacio y pre-asignar el
+            // fichero con su tamaño final antes de gastar datos descargando
+            if (task.total > 0 && task.extra().optString("tree", "").isEmpty()) {
+                File(task.dir).mkdirs()
+                val free = File(task.dir).usableSpace
+                val need = task.total + 16L * 1024 * 1024 // margen de seguridad
+                if (free in 0 until need) {
+                    throw DlException("espacio insuficiente: libres ${Kit.fmtBytes(free)}, hacen falta ${Kit.fmtBytes(task.total)}")
+                }
+            }
+            task.putExtra("wait", "creando archivo…")
+            engine.db.update(task)
             val sink0 = engine.openSink(task, fname)
             sink = sink0
+            if (task.total > 0) sink0.truncate(task.total) // pre-asignacion (setLength)
             if (task.segs.isEmpty()) plan()
+            task.putExtra("wait", "")
             task.state = St.RUNNING
             engine.db.update(task)
 
             var pool: java.util.concurrent.ExecutorService? = null
             try {
-                if (task.total > 0) sink.truncate(task.total)
                 pool = Executors.newFixedThreadPool(task.segs.size.coerceIn(1, 16))
                 val futs = ArrayList<java.util.concurrent.Future<*>>()
                 for (s in task.segs) futs.add(pool.submit { segLoop(s, sink0) })
@@ -102,7 +119,25 @@ class HttpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             engine.notifyChanged()
         } catch (e: Exception) {
             try { sink?.close() } catch (e2: Exception) { }
-            onError(e)
+            if (e is LinkExpired && task.extra().optString("origin", "").isNotEmpty()) {
+                // enlace firmado vencido: reabrir la página de origen y
+                // recapturar el enlace; la descarga reanuda desde el .part
+                task.calcDone()
+                task.saveSegs()
+                if (!task.extra().optBoolean("refrescoAuto", false)) {
+                    task.putExtra("refrescoAuto", true)
+                    task.state = St.PAUSED
+                    task.error = ""
+                    engine.db.update(task)
+                    engine.notifyChanged()
+                    engine.requestLinkRefresh(task, manual = false)
+                } else {
+                    task.state = St.ERROR
+                    task.error = "enlace caducado (${e.message}); usa «Refrescar enlace» en el menú de la tarea"
+                    engine.db.update(task)
+                    engine.notifyChanged()
+                }
+            } else onError(e)
         }
     }
 
@@ -165,10 +200,15 @@ class HttpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                     // rango ya completado
                     break
                 } else {
+                    if (code == 401 || code == 403 || code == 410) {
+                        // enlace firmado vencido: sin reintentos inutiles
+                        throw LinkExpired("HTTP $code")
+                    }
                     throw DlException("HTTP $code")
                 }
             } catch (e: Exception) {
                 if (stopped) return
+                if (e is LinkExpired) throw e
                 retry++
                 if (retry > 6) throw DlException("fallo tras $retry intentos: ${e.message}")
                 try { Thread.sleep(800L * retry) } catch (ie: InterruptedException) { return }
