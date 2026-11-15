@@ -1,10 +1,30 @@
-# TurboDL 3.4.0
+# TurboDL 3.5.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios en Rust vendido como AAR).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.5.0
+
+| Área | Qué hay de nuevo |
+|---|---|
+| Crash del bloqueador solucionado | Blindaje completo de la integración del motor adblock-rust: todo acceso usa `catch(Throwable)` (un `UnsatisfiedLinkError`/`NoClassDefFoundError` degrada a la lista de hosts en vez de matar el proceso); nunca se llama al nativo con URLs que no sean http/https (páginas de error sin conexión, about:blank); el **CSS cosmético se calcula en hilo de fondo y con tope de 256 KB** (los selectores genéricos de EasyList pueden ocupar megas y su construcción en el hilo UI provocaba `OutOfMemoryError` — el crash principal); self-test del motor antes de marcarlo listo; inicialización solo con el bloqueador activado y en el arranque de la app; equipos de **< 1,5 GB de RAM cargan solo EasyList** (modo lite con cache propio); `NATIVE_LOCK` evita use-after-free al sustituir el motor. **Las listas siguen integradas en el APK: el bloqueo funciona sin conexión desde la primera instalación** |
+| Introducción de primera instalación | Estilo 1DM: bienvenida → notificaciones de progreso (API 33+) → carpeta de descargas (interna sin permisos o pública/SD vía SAF) → exención de optimización de batería (con consejo para Xiaomi/Huawei) → resumen. Al abrir la app, si falta algo importante aparece un diálogo «Configuración recomendada» con el paso directo |
+| Gestor de descargas externo | TurboDL ahora se registra para **enlaces http/https** (`VIEW + BROWSABLE`), como 1DM/Gopeed: aparece en el selector de otras apps (p. ej. navegadores como Via Browser o «Compartir →») para descargar con TurboDL desde una tercera aplicación. Además `onNewIntent` maneja los enlaces cuando la app ya está abierta |
+| Cuadrícula de pestañas | Cerrar una pestaña desde la cuadrícula **se refleja al instante** (antes la tarjeta seguía visible hasta reabrir la vista); si es la última, la cuadrícula se cierra |
+
+### Diagnóstico del crash (para el registro)
+Informe del usuario: crashes al abrir el navegador/recargar sin conexión con
+el bloqueador activado; sin bloqueador, todo normal. Análisis del wrapper JNI
+(`adblock-rs-kt-wrapper`, Rust con `panic=abort`): las URLs inválidas no
+paniquean (llegan como `RuntimeException` de Java), pero con el bloqueador
+activado cada página construía en el **hilo principal** un CSS cosmético que
+con EasyList+EasyPrivacy alcanza megas → `OutOfMemoryError` (un `Error`, no
+`Exception`) sin capturar → crash; las páginas de error sin conexión también
+reciben selectores genéricos, de ahí que se agravara offline. Lo corrige el
+conjunto de blindajes listado arriba.
 
 ## Novedades de la 3.4.0
 
