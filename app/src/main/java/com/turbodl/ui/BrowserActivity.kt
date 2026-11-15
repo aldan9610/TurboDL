@@ -277,6 +277,9 @@ class BrowserActivity : Activity() {
     private val detected = LinkedHashMap<String, Detected>()
     private val uiH = Handler(Looper.getMainLooper())
     private var liveAdapter: BaseAdapter? = null
+    // cuadrícula de pestañas abierta (para refrescarla al cerrar una)
+    private var tabsGridAdapter: BaseAdapter? = null
+    private var tabsGridDlg: android.app.Dialog? = null
 
     inner class Bridge {
         @JavascriptInterface
@@ -308,9 +311,11 @@ class BrowserActivity : Activity() {
 
         CookieManager.getInstance().setAcceptCookie(true)
 
-        // motor de bloqueo de anuncios adblock-rust: carga EasyList+EasyPrivacy
-        // en segundo plano (deserializado rapido si ya se serializo antes)
-        AdBlockEngine.ensure(applicationContext)
+        // motor de bloqueo adblock-rust: por si la app se abrió directo aquí
+        // (App.onCreate ya lo inicializa con el bloqueador activado)
+        if (AdBlockEngine.activado(applicationContext)) {
+            AdBlockEngine.ensure(applicationContext)
+        }
 
         findViewById<Button>(R.id.btnBack).setOnClickListener { if (web.canGoBack()) web.goBack() }
         findViewById<Button>(R.id.btnFwd).setOnClickListener { if (web.canGoForward()) web.goForward() }
@@ -1019,6 +1024,10 @@ class BrowserActivity : Activity() {
             .setNegativeButton("Cerrar", null)
             .create()
         dlgRef[0] = dlg
+        // referencias para que closeTabFromGrid refresque esta vista al instante
+        tabsGridAdapter = adapter
+        tabsGridDlg = dlg
+        dlg.setOnDismissListener { tabsGridAdapter = null; tabsGridDlg = null }
         lv.setOnItemClickListener { _, _, p, _ ->
             dlg.dismiss()
             if (p == tabs.size) newTab("") else switchTab(p)
@@ -1098,7 +1107,22 @@ class BrowserActivity : Activity() {
         bg.setColor(if (p == cur) 0x30FF6D00 else 0x1F888888)
         if (p == cur) bg.setStroke(dp(2), 0xFFFF6D00.toInt())
         card.background = bg
-        card.findViewById<TextView>(android.R.id.button1).setOnClickListener { closeTab(p) }
+        card.findViewById<TextView>(android.R.id.button1).setOnClickListener { closeTabFromGrid(p) }
+    }
+
+    /** Cerrar pestaña desde la cuadrícula: refleja el cambio AL INSTANTE
+     *  (el informe del usuario: la tarjeta seguía visible tras cerrar). */
+    private fun closeTabFromGrid(p: Int) {
+        closeTab(p)
+        try {
+            tabsGridAdapter?.notifyDataSetChanged()
+        } catch (e: Exception) { }
+        updateTabButton()
+        renderStrip()
+        if (tabsGridDlg?.isShowing == true && tabs.size <= 1) {
+            // quedó la pestaña vacía que crea closeTab: cerrar la cuadrícula
+            tabsGridDlg?.dismiss()
+        }
     }
 
     /** Menu de pulsacion larga sobre un enlace: primera fila o segundo plano. */
@@ -1344,10 +1368,21 @@ class BrowserActivity : Activity() {
             if (isActive) prog.visibility = View.GONE
             injectOn(view)
             if (readerMode) injectOn(view, READERS_JS)
-            // filtro cosmético del motor adblock: oculta huecos de anuncios
+            // filtro cosmético del motor adblock: oculta huecos de anuncios.
+            // Se calcula en HILO DE FONDO (los selectores genéricos de EasyList
+            // pueden ocupar mucho) y se inyecta al volver al hilo UI; nunca en
+            // el hilo principal para no bloquearlo ni reventar el heap.
             if (eng.sp.getBoolean("adblock", true) && url != null && url.startsWith("http")) {
-                val css = AdBlockEngine.cssFor(url)
-                if (css.isNotEmpty()) injectOn(view, cosmeticJs(css))
+                val v = view
+                val pageUrl = url
+                Thread {
+                    val css = try { AdBlockEngine.cssFor(pageUrl) } catch (e: Throwable) { "" }
+                    if (css.isNotEmpty()) {
+                        runOnUiThread {
+                            try { injectOn(v, cosmeticJs(css)) } catch (e: Throwable) { }
+                        }
+                    }
+                }.apply { isDaemon = true; name = "adblock-css" }.start()
             }
             if (url != null && url.startsWith("http")) {
                 t.url = url
@@ -1386,21 +1421,26 @@ class BrowserActivity : Activity() {
                 addDetected(Kit.normalizeSniffUrl(u), "req")
             // bloqueador de anuncios: motor adblock-rust (EasyList + EasyPrivacy,
             // cosmetico y scriptlets); si aun no esta listo o fallo, cae a la
-            // lista compacta de hosts que existia antes
-            if (eng.sp.getBoolean("adblock", true)) {
-                val host = (request.url.host ?: "").lowercase(Locale.US)
-                var block = false
-                if (AdBlockEngine.ready()) {
-                    block = AdBlockEngine.shouldBlock(view?.url ?: u, u, AdBlockEngine.typeOf(u))
-                } else if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
-                    block = true
+            // lista compacta de hosts que existia antes. Nunca debe lanzar:
+            // try(Throwable) para que ni un Error detenga la navegacion.
+            try {
+                if (eng.sp.getBoolean("adblock", true)) {
+                    val host = (request.url.host ?: "").lowercase(Locale.US)
+                    var block = false
+                    if (AdBlockEngine.ready()) {
+                        block = AdBlockEngine.shouldBlock(view?.url ?: u, u, AdBlockEngine.typeOf(u))
+                    } else if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
+                        block = true
+                    }
+                    if (block) {
+                        val t = tabOf(view)
+                        if (t != null) t.blocked++
+                        return WebResourceResponse(
+                            "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
+                    }
                 }
-                if (block) {
-                    val t = tabOf(view)
-                    if (t != null) t.blocked++
-                    return WebResourceResponse(
-                        "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
-                }
+            } catch (e: Throwable) {
+                // cualquier problema del bloqueador no tira la peticion
             }
             return null
         }

@@ -7,7 +7,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Se solicitan en tiempo de ejecucion solo en Android 6..9 cuando el
+    <!-- Exención de optimización de batería: se solicita en la introducción
+         (estilo 1DM) para que Android no pare las descargas en segundo plano -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Se solicitan en tiempo de ejecución solo en Android 6..9 cuando el
          usuario elige guardar fuera de la carpeta de la app -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
@@ -35,6 +38,16 @@
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Enlaces http/https: hace que TurboDL aparezca registrada como
+                 gestor de descargas en el chooser de otras apps/navegadores
+                 (igual que 1DM o Gopeed) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
             </intent-filter>
             <!-- Abrir magnet / torrent desde otras apps -->
             <intent-filter>
@@ -76,6 +89,10 @@
             android:name=".ui.LockActivity"
             android:exported="false"
             android:excludeFromRecents="true" />
+
+        <activity
+            android:name=".ui.OnboardingActivity"
+            android:exported="false" />
 
         <service
             android:name=".service.DownloadService"

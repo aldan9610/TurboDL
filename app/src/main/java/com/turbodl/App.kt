@@ -11,6 +11,12 @@ class App : Application() {
         app = this
         engine = Engine(this)
         engine.init()
+        // motor adblock-rust: inicializar temprano (hilo de fondo) SOLO con el
+        // bloqueador activado; las listas están integradas en el APK, no
+        // necesita conexión la primera vez
+        if (com.turbodl.engine.AdBlockEngine.activado(this)) {
+            com.turbodl.engine.AdBlockEngine.ensure(this)
+        }
     }
 
     companion object {

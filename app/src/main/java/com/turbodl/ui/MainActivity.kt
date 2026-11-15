@@ -11,6 +11,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
@@ -83,6 +85,12 @@ class MainActivity : Activity() {
 
         requestNeededPermissions()
         maybeStartService()
+
+        // introducción de primera instalación (estilo 1DM): notificaciones,
+        // carpeta de descargas, batería/segundo plano
+        if (!eng.sp.getBoolean("onboardingDone", false)) {
+            startActivity(Intent(this, OnboardingActivity::class.java))
+        }
 
         // URL compartida desde otra app
         if (intent?.action == Intent.ACTION_SEND) {
@@ -301,6 +309,67 @@ class MainActivity : Activity() {
         eng.listener = { refresh() }
         refresh()
         checkClipboard()
+        feedbackConfig()
+    }
+
+    /** Feedback al abrir: si falta alguna configuración importante, se dice
+     *  al usuario qué hacer (una vez por sesión, sin insistir). */
+    @Volatile private var feedbackShown = false
+    private fun feedbackConfig() {
+        if (!eng.sp.getBoolean("onboardingDone", false)) return // la intro lo cubre
+        if (feedbackShown) return
+        feedbackShown = true
+        val pendientes = ArrayList<String>()
+        val acciones = ArrayList<() -> Unit>()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            pendientes.add("• Notificaciones desactivadas: no verás el progreso de las descargas.")
+            acciones.add {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
+            }
+        }
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            pendientes.add("• Segundo plano: Android puede frenar descargas largas por la batería.")
+            acciones.add {
+                try {
+                    startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:$packageName")))
+                } catch (e: Exception) { }
+            }
+        }
+        if (eng.sp.getString("dlMode", "app") == "saf" && !eng.usingSaf()) {
+            pendientes.add("• La carpeta pública elegida ya no es accesible: se usa la carpeta interna hasta volver a elegirla.")
+            acciones.add { startActivity(Intent(this, SettingsActivity::class.java)) }
+        }
+        if (pendientes.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Configuración recomendada")
+            .setMessage("Para que todo funcione bien:\n\n" + pendientes.joinToString("\n"))
+            .setPositiveButton("Configurar") { _, _ -> acciones.firstOrNull()?.invoke() }
+            .setNeutralButton("Ver la introducción") { _, _ ->
+                startActivity(Intent(this, OnboardingActivity::class.java))
+            }
+            .setNegativeButton("Ahora no", null)
+            .show()
+    }
+
+    /** Enlaces compartidos/recibidos mientras la app ya está abierta
+     *  (singleTask: los VIEW externos llegan aquí, no a onCreate). */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_SEND) {
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+            val url = text.split(Regex("\\s+")).firstOrNull {
+                it.startsWith("http") || it.startsWith("magnet") || it.contains("://")
+            } ?: text
+            if (url.isNotEmpty()) showAddDialog(url)
+        } else if (intent.action == Intent.ACTION_VIEW) {
+            val u = intent.dataString ?: ""
+            if (u.isNotEmpty()) showAddDialog(u)
+        }
     }
 
     /** Enlace copiado detectado: ofrecer descargarlo o abrirlo. */
