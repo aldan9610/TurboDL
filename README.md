@@ -1,10 +1,25 @@
-# TurboDL 3.5.0
+# TurboDL 3.5.1
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios en Rust vendido como AAR).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.5.1
+
+Informe: el navegador no renderizaba imágenes ni vídeos, incluso con el
+bloqueador desactivado. Investigación completa (diff 3.3.0→3.5.0 del camino
+del WebView, fuente Kotlin del wrapper JNI y **pruebas empíricas con las
+bindings Python del mismo crate Rust** sobre las listas incluidas):
+
+| Hallazgo | Corrección |
+|---|---|
+| **Orden de argumentos invertido en `shouldBlock`**: el wrapper espera `(url=recurso, sourceUrl=página)` y se enviaba `(página, recurso)`. Probado empíricamente: con ese orden el motor bloquea **0 %** (era inerte); con el orden correcto bloquea el 75 % de anuncios y el 0 % de recursos legítimos | Orden corregido + self-test de arranque alineado (el motor ahora sí llega a READY y el bloqueo funciona de verdad) |
+| Nada del código bloquea con el bloqueador desactivado (verificado): el fallo de imágenes/vídeos con OFF es de red, no de la app — el informe previo venía de un teléfono **sin conexión** (el texto en caché sí carga; imágenes y vídeos no) | Nuevo `onReceivedError` del frame principal: aviso claro «La página no cargó (…). Si el teléfono está sin internet, no se ven imágenes ni vídeos aunque el bloqueador esté desactivado» |
+| Una regla que acertase el frame principal dejaría la pestaña en blanco | El **frame principal nunca se bloquea** (solo subrecursos, como uBlock) |
+| Posible sobre-bloqueo futuro no reproducible aquí | **Fusible**: si el motor bloquease > 60 % de ≥ 12 peticiones de una carga, se pausa en la sesión (queda la lista de hosts) y se avisa con un toast |
+| CSS cosmético validado: YouTube 12 selectores, Facebook 4, X 7, Wikipedia/Instagram 0 — ninguno esconde img/video | Sin cambios (tope 256 KB y hilo de fondo ya en 3.5.0) |
 
 ## Novedades de la 3.5.0
 
