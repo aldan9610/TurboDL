@@ -1,10 +1,40 @@
-# TurboDL 3.5.1
+# TurboDL 3.5.2
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios en Rust vendido como AAR).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.5.2 — compatibilidad con móviles de poca RAM
+
+El informe: el navegador seguía sin mostrar nada. **Revisión completa** con el
+resultado definitivo de las reglas (bindings Python del mismo crate Rust, con
+la clasificación `typeOf()` EXACTA de la app y las listas integradas):
+
+- **Las reglas del motor son limpias**: 0/192 subrecursos legítimos bloqueados
+  en ambos modos (lite y full), incluso los sin extensión que la app clasifica
+  como `xmlhttprequest` (avatares y miniaturas de Google/YT/X/FB); 48/96
+  anuncios bloqueados en lite y 96/96 en full. El cosmético es pequeño
+  (12-35 selectores por página) y no esconde `img`/`video`. **El bloqueo no
+  es la causa del navegador en blanco.**
+- **La causa real en móviles de 1 GB es la RAM del motor**: medido con el
+  mismo crate, solo EasyList ocupa ≈90 MB de RAM nativa (≈165 MB con
+  EasyPrivacy). En un teléfono de 1 GB eso estrangula al proceso que
+  renderiza el WebView → **página en blanco**. Coincide con «todo empezó con
+  el bloqueador» (la 3.4.0 lo introdujo).
+  **Fix por umbrales de RAM**: < 2 GB **no carga el motor nativo** (filtra con
+  la lista básica de hosts, ≈0 MB — así funcionaba la 3.3.0); 2-3 GB solo
+  EasyList; ≥ 3 GB ambas listas.
+- **Recuperación del renderizador** (`onRenderProcessGone`): si el proceso que
+  dibuja el WebView muere (presión de RAM o crash del visor), antes la página
+  quedaba en blanco para siempre; ahora **se reconstruye la pestaña, se
+  recarga y se avisa** («Visor reiniciado #N»).
+- **Panel de diagnóstico** en el menú del navegador («🧪 Diagnóstico del
+  navegador»): versión de TurboDL y del WebView, estado real del motor
+  (LISTO/lite/full/no cargado por RAM/con motivo), RAM libre y total,
+  bloqueados en esta página y reinicios del visor. Es lo que hay que
+  reportar si algo sigue fallando.
 
 ## Novedades de la 3.5.1
 

@@ -22,6 +22,7 @@ import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -286,6 +287,9 @@ class BrowserActivity : Activity() {
     private var adFuseReq = 0
     private var adFuseBlk = 0
     private var offlineTold = false
+    // reinicios del renderizador del WebView (presión de RAM en móviles humildes)
+    private var rendererGoneCount = 0
+    private var rendererGoneLast = ""
 
     inner class Bridge {
         @JavascriptInterface
@@ -438,6 +442,7 @@ class BrowserActivity : Activity() {
         pm.menu.add(0, 4, 13, "🧹 Limpiar historial de búsqueda")
         pm.menu.add(0, 5, 14, "🍪 Limpiar cookies y caché")
         pm.menu.add(0, 7, 15, "📌 Añadir esta página a accesos")
+        pm.menu.add(0, 17, 16, "🧪 Diagnóstico del navegador")
         pm.setOnMenuItemClickListener { mi ->
             when (mi.itemId) {
                 1 -> showEngineMenu(v)
@@ -458,10 +463,42 @@ class BrowserActivity : Activity() {
                 4 -> { clearHistory(); toast("Historial de búsqueda borrado") }
                 5 -> clearPrivacy()
                 7 -> addCurrentAsSite()
+                17 -> showDiagnostico()
             }
             true
         }
         pm.show()
+    }
+
+    /** Panel de diagnóstico: estado real del motor, RAM del dispositivo,
+     *  versión del WebView y reinicios del renderizador. Sustituye al
+     *  logcat cuando no hay ordenador: lo que muestra aquí es lo que
+     *  hay que reportar. */
+    private fun showDiagnostico() {
+        val t = if (cur in tabs.indices) tabs[cur] else null
+        val msg = StringBuilder()
+        msg.append("TurboDL 3.5.2 (Android ").append(android.os.Build.VERSION.RELEASE)
+            .append(")\n\n")
+        try {
+            val pi = packageManager.getPackageInfo("com.google.android.webview", 0)
+            msg.append("Visor web (WebView): ").append(pi.versionName).append('\n')
+        } catch (e: Exception) {
+            msg.append("Visor web: versión de sistema\n")
+        }
+        msg.append('\n').append(AdBlockEngine.diagnostico(this))
+        msg.append("- Bloqueados en esta página: ").append(t?.blocked ?: 0).append('\n')
+        if (rendererGoneCount > 0) {
+            msg.append("- Reinicios del visor: ").append(rendererGoneCount)
+                .append(" (último ").append(rendererGoneLast).append(")\n")
+        }
+        msg.append("\nSi una página queda en blanco o sin imágenes: revisa la ")
+            .append("conexión, recarga, y si reaparece el aviso de reinicio ")
+            .append("reporta lo que muestra esta ventana.")
+        AlertDialog.Builder(this)
+            .setTitle("🧪 Diagnóstico del navegador")
+            .setMessage(msg.toString())
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun engineIndex(): Int {
@@ -1387,6 +1424,35 @@ class BrowserActivity : Activity() {
                     "internet, no se ven imágenes ni vídeos aunque el " +
                     "bloqueador esté desactivado.")
             }
+        }
+
+        /** El proceso que renderiza el WebView murió (presión de RAM en
+         *  móviles humildes, crash del visor…): SIN ESTO la página queda en
+         *  blanco para siempre y parece que "el navegador no renderiza nada".
+         *  Se reconstruye el WebView de la pestaña y se recarga. */
+        override fun onRenderProcessGone(
+            view: WebView?, detail: RenderProcessGoneDetail?
+        ): Boolean {
+            val t = tabOf(view) ?: return true
+            rendererGoneCount++
+            rendererGoneLast = java.text.SimpleDateFormat("HH:mm:ss")
+                .format(java.util.Date()) +
+                if (detail?.didCrash() == true) " (crash del visor)" else " (memoria)"
+            try { (view?.parent as? ViewGroup)?.removeView(view) } catch (e: Exception) { }
+            try { view?.destroy() } catch (e: Exception) { }
+            t.wv = null
+            t.thumb = null
+            ensureWv(t)
+            if (t.url.isNotEmpty()) {
+                try { t.wv?.loadUrl(t.url) } catch (e: Exception) { }
+            }
+            if (t === tabs.getOrNull(cur)) {
+                attach(t)
+                editUrl.setText(t.wv?.url ?: t.url)
+            }
+            renderStrip()
+            toast("Visor reiniciado #$rendererGoneCount — la página se recargó")
+            return true
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {

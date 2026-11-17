@@ -14,8 +14,8 @@ android {
         // WebView actualizable ni cuota relevante
         minSdk 26
         targetSdk 34
-        versionCode 10
-        versionName "3.5.1"
+        versionCode 11
+        versionName "3.5.2"
         // Solo arquitecturas de telefonos reales (ahorro de tamano y RAM)
         ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
     }

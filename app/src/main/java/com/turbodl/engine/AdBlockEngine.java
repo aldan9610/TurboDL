@@ -38,9 +38,11 @@ import java.util.Locale;
  *   construirlos en el hilo UI provocaba OutOfMemoryError (Error sin
  *   capturar -> crash), sobre todo en páginas de error sin conexión.
  * - Un self-test con URLs limpias valida el motor antes de marcarlo READY.
- * - Equipos con menos de 1,5 GB de RAM cargan solo EasyList (modo lite) y
- *   guardan un cache distinto (engine-lite.bin); EasyPrivacy es de
- *   rastreadores, EasyList sigue bloqueando los anuncios.
+ * - MODO POR RAM (medido con el motor real: EasyList ≈90 MB, ambas ≈165 MB):
+ *   < 2 GB no carga el motor nativo (solo lista de hosts, memoria casi nula);
+ *   2-3 GB solo EasyList (engine-lite.bin); >= 3 GB ambas listas
+ *   (engine-full.bin). En un teléfono de 1 GB el motor estrangulaba al
+ *   renderizador del WebView y las páginas quedaban en blanco.
  * - Un NATIVE_LOCK serializa llamadas nativas y sustituciones del motor
  *   (updateLists) para evitar use-after-free al cerrar el motor en uso.
  * - ensure() solo se llama con el bloqueador ACTIVADO; la inicialización
@@ -66,8 +68,11 @@ public final class AdBlockEngine {
     private static final Object LOCK = new Object();
     private static final Object NATIVE_LOCK = new Object();
 
-    /** false = modo lite (< 1,5 GB RAM): solo EasyList. */
+    /** false = modo lite (2-3 GB RAM): solo EasyList. */
     private static volatile boolean fullLists = true;
+
+    /** Motivo por el que el motor no está disponible (para diagnóstico). */
+    private static volatile String motivo = "";
 
     /** Nombres de archivo de listas en assets/adblock y filesDir/adblock. */
     private static final String[] LISTAS = {"easylist.txt", "easyprivacy.txt"};
@@ -101,21 +106,41 @@ public final class AdBlockEngine {
         }
     }
 
-    /** Equipos humildes: solo EasyList para reducir RAM y tiempo de carga. */
-    private static boolean esLowRam(Context ctx) {
+    /**
+     * Modo según la RAM TOTAL del dispositivo, medido con el motor real:
+     *   < 2 GB  -> 0 (SIN motor nativo: consume ~90 MB+ y en un teléfono de
+     *                   1 GB estrangula al renderizador del WebView, que queda
+     *                   en blanco; la lista de hosts bloquea lo esencial con
+     *                   memoria casi nula — así funcionaba la 3.3.0)
+     *   2-3 GB  -> 1 (lite: solo EasyList, ~90 MB)
+     *   >= 3 GB -> 2 (full: EasyList+EasyPrivacy, ~165 MB)
+     */
+    private static int modoRam(Context ctx) {
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) return false;
+            if (am == null) return 1;
             ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
             am.getMemoryInfo(mi);
-            return mi.totalMem < 1500L * 1024 * 1024;
+            if (mi.totalMem < 2000L * 1024 * 1024) return 0;
+            if (mi.totalMem < 3000L * 1024 * 1024) return 1;
+            return 2;
         } catch (Throwable e) {
-            return false;
+            return 1;
         }
     }
 
     private static void init(Context ctx) throws Exception {
-        fullLists = !esLowRam(ctx);
+        int modoR = modoRam(ctx);
+        if (modoR == 0) {
+            synchronized (LOCK) {
+                state = STATE_FALLIDO;
+                motivo = "RAM total < 2 GB: motor nativo desactivado "
+                    + "(solo lista básica de hosts)";
+            }
+            Log.w("AdBlockEngine", motivo);
+            return;
+        }
+        fullLists = modoR == 2;
         File d = dir(ctx);
         d.mkdirs();
         // modo persistido para invalidar el cache si cambia lite<->full
@@ -211,7 +236,8 @@ public final class AdBlockEngine {
             if (!test) {
                 try { eng.close(); } catch (Throwable e) { }
                 state = STATE_FALLIDO;
-                Log.w("AdBlockEngine", "self-test falló: usando lista de hosts");
+                motivo = "self-test falló: usando lista de hosts";
+                Log.w("AdBlockEngine", motivo);
                 return;
             }
             synchronized (LOCK) {
@@ -230,6 +256,7 @@ public final class AdBlockEngine {
     private static void fallo(Throwable e) {
         synchronized (LOCK) {
             state = STATE_FALLIDO;
+            motivo = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             AdblockEngine eng = engine;
             engine = null;           // primero fuera de alcance...
             if (eng != null) {
@@ -254,6 +281,40 @@ public final class AdBlockEngine {
      *  proporción anómala de peticiones (p. ej. todas las imágenes). */
     public static void deshabilitarSesion() {
         fallo(new Exception("fusible: proporción de bloqueo anómala"));
+    }
+
+    /** Resumen legible del estado para el panel de diagnóstico del navegador. */
+    public static String diagnostico(Context ctx) {
+        StringBuilder sb = new StringBuilder();
+        boolean on = activado(ctx);
+        sb.append("- Bloqueador: ").append(on ? "activado" : "desactivado en ajustes")
+            .append('\n');
+        if (!on) {
+            sb.append("- Motor: no se carga (bloqueador apagado)");
+            return sb.toString();
+        }
+        if (state == STATE_READY) {
+            sb.append("- Motor Rust: LISTO (")
+                .append(fullLists ? "EasyList + EasyPrivacy" : "solo EasyList")
+                .append(")\n");
+        } else if (state == STATE_FALLIDO) {
+            sb.append("- Motor Rust: NO EN USO (")
+                .append(motivo == null || motivo.isEmpty() ? "no disponible" : motivo)
+                .append(")\n- Filtrando con la lista básica de hosts (≈0 MB de RAM)\n");
+        } else {
+            sb.append("- Motor Rust: cargando…\n");
+        }
+        try {
+            ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                sb.append("- RAM: ").append(mi.availMem / (1024L * 1024L))
+                    .append(" MB libres de ").append(mi.totalMem / (1024L * 1024L))
+                    .append(" MB\n");
+            }
+        } catch (Throwable e) { }
+        return sb.toString();
     }
 
     private static boolean httpLimpia(String url) {
