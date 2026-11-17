@@ -195,13 +195,14 @@ public final class AdBlockEngine {
             boolean test;
             try {
                 synchronized (NATIVE_LOCK) {
+                    // orden del wrapper: (url=RECURSO, sourceUrl=PÁGINA, tipo)
                     test = eng.shouldBlock(
-                        "https://www.ejemplo.com/",
                         "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                        "https://www.ejemplo.com/",
                         "script")
                         && !eng.shouldBlock(
-                        "https://www.ejemplo.com/",
                         "https://www.ejemplo.com/css/main.css",
+                        "https://www.ejemplo.com/",
                         "stylesheet");
                 }
             } catch (Throwable e) {
@@ -248,6 +249,13 @@ public final class AdBlockEngine {
         return state == STATE_FALLIDO;
     }
 
+    /** Fusible anti-sobre-bloqueo: pausa el motor por esta sesión y deja solo
+     *  la lista de hosts. Lo llama el navegador si el motor bloquea una
+     *  proporción anómala de peticiones (p. ej. todas las imágenes). */
+    public static void deshabilitarSesion() {
+        fallo(new Exception("fusible: proporción de bloqueo anómala"));
+    }
+
     private static boolean httpLimpia(String url) {
         return url != null && (url.startsWith("http://") || url.startsWith("https://"));
     }
@@ -257,7 +265,12 @@ public final class AdBlockEngine {
         if (eng == null || !httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return false;
         try {
             synchronized (NATIVE_LOCK) {
-                return eng.shouldBlock(pageUrl, reqUrl, type);
+                // ORDEN DEL WRAPPER (verificado en el fuente Kotlin y probado
+                // con las bindings Python del mismo crate): shouldBlock(url,
+                // sourceUrl, type) donde url = RECURSO pedido y sourceUrl =
+                // PÁGINA. En 3.5.0 se enviaron invertidos y el motor quedó
+                // inerte (0 bloqueos, comprobado empíricamente).
+                return eng.shouldBlock(reqUrl, pageUrl, type);
             }
         } catch (Throwable e) {
             return false;

@@ -23,6 +23,7 @@ import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -280,6 +281,11 @@ class BrowserActivity : Activity() {
     // cuadrícula de pestañas abierta (para refrescarla al cerrar una)
     private var tabsGridAdapter: BaseAdapter? = null
     private var tabsGridDlg: android.app.Dialog? = null
+    // fusible anti-sobre-bloqueo del motor (cuenta por carga de página) y
+    // aviso de red caída (para no confundir "sin conexión" con un fallo de la app)
+    private var adFuseReq = 0
+    private var adFuseBlk = 0
+    private var offlineTold = false
 
     inner class Bridge {
         @JavascriptInterface
@@ -1351,6 +1357,10 @@ class BrowserActivity : Activity() {
             val t = tabOf(view) ?: return
             val isActive = view === activeWv()
             t.blocked = 0
+            // fusible y aviso de red se reinician en cada carga
+            adFuseReq = 0
+            adFuseBlk = 0
+            offlineTold = false
             if (url != null && url != "about:blank") {
                 t.url = url
                 if (isActive) {
@@ -1360,6 +1370,23 @@ class BrowserActivity : Activity() {
                 }
             }
             renderStrip()
+        }
+
+        /** Diagnóstico claro de errores de carga: si el teléfono está sin
+         *  conexión, las imágenes y vídeos no se ven aunque el bloqueador
+         *  esté desactivado — se avisa para no confundir la causa. */
+        override fun onReceivedError(
+            view: WebView?, request: WebResourceRequest?, error: WebResourceError?
+        ) {
+            super.onReceivedError(view, request, error)
+            if (request?.isForMainFrame == true && error != null && !offlineTold) {
+                offlineTold = true
+                val desc = error.description?.toString()?.takeIf { it.isNotBlank() }
+                    ?: "error de red"
+                toast("La página no cargó ($desc). Si el teléfono está sin " +
+                    "internet, no se ven imágenes ni vídeos aunque el " +
+                    "bloqueador esté desactivado.")
+            }
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
@@ -1423,12 +1450,29 @@ class BrowserActivity : Activity() {
             // cosmetico y scriptlets); si aun no esta listo o fallo, cae a la
             // lista compacta de hosts que existia antes. Nunca debe lanzar:
             // try(Throwable) para que ni un Error detenga la navegacion.
+            // El FRAME PRINCIPAL nunca se bloquea: una regla que pifie la
+            // pagina entera deja la pestaña en blanco (solo se filtran
+            // subrecursos, como hace uBlock).
             try {
-                if (eng.sp.getBoolean("adblock", true)) {
+                if (eng.sp.getBoolean("adblock", true) && !request.isForMainFrame) {
                     val host = (request.url.host ?: "").lowercase(Locale.US)
                     var block = false
                     if (AdBlockEngine.ready()) {
+                        adFuseReq++
                         block = AdBlockEngine.shouldBlock(view?.url ?: u, u, AdBlockEngine.typeOf(u))
+                        if (block) adFuseBlk++
+                        // fusible: si el motor bloquease una proporcion anomala
+                        // (p. ej. todas las imagenes), se pausa y queda la
+                        // lista basica de hosts; la web vuelve a renderizar
+                        if (adFuseReq >= 12 && adFuseBlk * 100 > adFuseReq * 60) {
+                            AdBlockEngine.deshabilitarSesion()
+                            adFuseReq = 0
+                            adFuseBlk = 0
+                            runOnUiThread {
+                                toast("Motor de bloqueo pausado (bloqueo anómalo); " +
+                                    "se usa la lista básica")
+                            }
+                        }
                     } else if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
                         block = true
                     }
