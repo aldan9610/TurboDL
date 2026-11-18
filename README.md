@@ -1,10 +1,50 @@
-# TurboDL 3.6.0
+# TurboDL 3.7.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.7.0 — escudo de bloqueos y anti-redirecciones
+
+### 🛡 Escudo: qué bloquea el navegador y cuánto
+- Nuevo botón **🛡 en la barra del navegador** con el contador de bloqueos de
+  la página activa: subrecursos de anuncios/rastreadores, ventanas emergentes
+  y redirecciones.
+- Al pulsarlo se abre la **vista de detalles**: lista de todo lo bloqueado en
+  esa página (tipo de recurso 📜🖼🎨🎬⚙, host y ruta del elemento y **la regla
+  exacta de EasyList/EasyPrivacy que lo bloqueó**), más el desglose de
+  ventanas y redirecciones.
+- Contadores por pestaña (se reinician en cada carga; el del diagnóstico del
+  menú sigue funcionando).
+
+### ↪ Anti-redirecciones (eporner, tnaflix, spankbang y similares)
+Los popunders de esos sitios secuestraban la pestaña actual porque el
+WebView no tenía ventanas múltiples activadas. Ahora:
+- `setSupportMultipleWindows(true)`: cualquier `window.open` pasa por el
+  navegador, y **las ventanas sin gesto de usuario se bloquean y cuentan**;
+  las legítimas (enlace tocado → target=_blank) se abren en pestaña nueva.
+- **Guardia de redirección en `shouldOverrideUrlLoading`**: navegación del
+  frame principal SIN toque de usuario hacia otro dominio base se consulta
+  contra la lista de filtros (reglas `$popup` y `||red-de-anuncios^` de
+  EasyList) y contra una lista compacta de redes de popunder conocidas
+  (exoclick, popads, popcash, propellerads, adsterra, hilltopads…).
+  Los enlaces tocados por el usuario nunca se tocan, y las redirecciones
+  legítimas (inicios de sesión, OAuth) no están en esas listas → pasan.
+- Toast informativo «Redirección de anuncio bloqueada» y todo queda en la
+  vista de detalles del escudo.
+
+### ⬇⏸🔀 Fases de descarga visibles (video / audio / uniendo)
+- Cuando un stream DASH/HLS entrega video y audio por separado, la fila de
+  tarea ahora muestra la fase: **«audio X MB»** durante la pista de audio
+  (con progreso en vivo) y **«Uniendo video y audio…»** durante la fusión;
+  en HLS/DASH sin pista separada dice «Preparando MP4…».
+- Sobre la unión en sí: **no se usa ffmpeg**. La fusión audio+video la hace
+  `org.mp4parser` (isoparser + muxer, JARs Java vendidos en `app/libs`,
+  sin código nativo): lee las pistas (`handler` vide/soun), las reordena por
+  tiempo y remuxea a MP4 indexado (`Merge.kt`). Si la fusión falla, los dos
+  archivos se conservan por separado y la tarea lo anota.
 
 ## Novedades de la 3.6.0 — bloqueador 100 % Kotlin (adiós al Rust)
 

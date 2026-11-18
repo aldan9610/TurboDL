@@ -105,6 +105,7 @@ class HlsDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             val audioUrl = if (ex.optString("audioUrl", "").isNotEmpty())
                 ex.optString("audioUrl", "") else (masterAudio ?: "")
             if (audioUrl.isNotEmpty()) {
+                task.putExtra("fase", "audio")
                 audioFile = downloadAudio(cacheDir, audioUrl)
             }
 

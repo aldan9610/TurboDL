@@ -64,6 +64,7 @@ class DashDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             cacheDir.mkdirs()
 
             // ---- pista principal (video o la unica disponible) ----
+            task.putExtra("fase", "video")
             val out = engine.openSink(task, outName)
             sink = out
             out.truncate(0)
@@ -71,6 +72,7 @@ class DashDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
             written = downloadRep(out, repV, task.url, written)
 
             // ---- audio separado si hay fusion ----
+            task.putExtra("fase", "audio")
             if (wantMerge && repA != null) {
                 val af = File(cacheDir, "audio.m4a")
                 val afos = java.io.FileOutputStream(af)
@@ -205,9 +207,15 @@ class DashDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
 
     private fun downloadRepTo(fos: java.io.FileOutputStream, rep: Mpd.Rep, mpdUrl: String, base: Long): Long {
         var written = base
+        var lastAudioReport = 0L
         val bufOut = object : Sink {
             override fun seekWrite(off: Long, buf: ByteArray, len: Int) {
                 fos.write(buf, 0, len); written += len
+                // progreso vivo del audio para la UI (cada 512 KB)
+                if (written - lastAudioReport > 512 * 1024) {
+                    lastAudioReport = written
+                    task.putExtra("audioDone", written)
+                }
             }
             override fun truncate(len: Long) { }
             override fun size(): Long = written

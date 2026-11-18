@@ -811,11 +811,22 @@ class MainActivity : Activity() {
                 St.RUNNING -> {
                     val eta = if (t.total > 0 && t.speed > 0)
                         " · resta ${Kit.fmtEta((t.total - t.done) / t.speed)}" else ""
-                    "${Kit.fmtSpeed(t.speed)} · ${Kit.fmtBytes(t.done)}" +
+                    // fase de audio separado (DASH/HLS con pistas distintas)
+                    val fase = extra.optString("fase", "")
+                    val audioInfo = if (fase == "audio") {
+                        val ab = extra.optLong("audioDone", 0)
+                        "audio" + (if (ab > 0) " " + Kit.fmtBytes(ab) else "") + " · "
+                    } else ""
+                    audioInfo + "${Kit.fmtSpeed(t.speed)} · ${Kit.fmtBytes(t.done)}" +
                             (if (t.total > 0) " / " + Kit.fmtBytes(t.total) else "") +
                             pctInfo + eta + segInfo + qInfo + dInfo
                 }
-                St.MERGING -> "Reconstruyendo índice del MP4…$pctInfo$segInfo$qInfo$dInfo"
+                St.MERGING -> {
+                    val tieneAudio = extra.has("audioBytes") || extra.has("audioIsMp4") ||
+                            extra.optString("fase", "") == "audio"
+                    (if (tieneAudio) "Uniendo video y audio…" else "Preparando MP4…") +
+                            pctInfo + segInfo + qInfo + dInfo
+                }
                 St.PAUSED -> "Pausado · ${Kit.fmtBytes(t.done)}$pctInfo$segInfo$qInfo$dInfo"
                 St.DONE -> "Completado · ${Kit.fmtBytes(if (t.total > 0) t.total else t.done)}$qInfo$dInfo"
                 St.ERROR -> "⚠ ${t.error}"

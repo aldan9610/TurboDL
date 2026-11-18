@@ -264,6 +264,19 @@ public final class AdBlockEngine {
         }
     }
 
+    /** Patrón de la regla que bloquearía reqUrl (para el escudo del navegador).
+     *  Vacío si el motor no está listo o la URL no se bloquea. */
+    public static String ruleFor(String pageUrl, String reqUrl, String type) {
+        FilterEngine eng = engine;
+        if (eng == null || !httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return "";
+        try {
+            String p = eng.debugMatch(reqUrl, pageUrl, type);
+            return (p == null || p.equals("-")) ? "" : p;
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
     /** CSS cosmético (ocultar elementos) para la página; vacío si no hay.
      *  Llamar desde un hilo de fondo; se limita a 256 KB. */
     public static String cssFor(String pageUrl) {

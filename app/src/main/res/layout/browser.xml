@@ -56,6 +56,16 @@
             android:textSize="14sp" />
 
         <Button
+            android:id="@+id/btnShield"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="40dp"
+            android:layout_height="wrap_content"
+            android:contentDescription="Bloqueos de anuncios en esta página"
+            android:text="🛡"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp" />
+
+        <Button
             android:id="@+id/btnReload"
             style="?android:attr/borderlessButtonStyle"
             android:layout_width="38dp"

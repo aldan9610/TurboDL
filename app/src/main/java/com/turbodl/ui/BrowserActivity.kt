@@ -84,6 +84,9 @@ class BrowserActivity : Activity() {
         var priv: Boolean = false // pestaña privada: sin historial ni persistencia
         var thumb: Bitmap? = null
         var blocked: Int = 0
+        var popups: Int = 0        // ventanas emergentes bloqueadas
+        var redirects: Int = 0     // redirecciones de anuncio bloqueadas
+        val blockedItems = ArrayList<String>() // detalles del escudo (cap 120)
     }
     private val tabs = ArrayList<Tab>()
     private var cur = 0
@@ -120,6 +123,15 @@ class BrowserActivity : Activity() {
          * Bloqueador de anuncios/rastreadores por host (lista compacta de
          * tokens; SIN CDNs de video para no romper reproducciones).
          */
+        // redes de popunder/redirección conocidas (fallback si el motor no
+        // está listo; con el motor listo manda EasyList: ||red^ y $popup)
+        private val REDIRECT_HOSTS = arrayOf(
+            "popads", "popcash", "exoclick", "exosrv", "exdynsrv", "exdyn",
+            "propellerads", "clickadu", "adsterra", "adskeeper", "hilltopads",
+            "juicyads", "magsrv", "adcash", "aducdn", "onclickalgo",
+            "onclickmega", "onclickperformance", "onclickpredictiv",
+            "betteradsystem", "brasstraffic", "realsrv", "trafficstars")
+
         private val AD_HOSTS = arrayOf(
             "doubleclick.net", "googlesyndication.com", "google-analytics.com",
             "googletagmanager.com", "googletagservices.com", "adservice.google",
@@ -330,6 +342,7 @@ class BrowserActivity : Activity() {
         findViewById<Button>(R.id.btnBack).setOnClickListener { if (web.canGoBack()) web.goBack() }
         findViewById<Button>(R.id.btnFwd).setOnClickListener { if (web.canGoForward()) web.goForward() }
         findViewById<Button>(R.id.btnGo).setOnClickListener { go() }
+        findViewById<Button>(R.id.btnShield).setOnClickListener { showBlockedDialog() }
         findViewById<Button>(R.id.btnReload).setOnClickListener {
             if (prog.visibility == View.VISIBLE) {
                 web.stopLoading()
@@ -667,6 +680,11 @@ class BrowserActivity : Activity() {
         ws.javaScriptEnabled = true
         ws.domStorageEnabled = true
         ws.mediaPlaybackRequiresUserGesture = false
+        // window.open pasa SIEMPRE por onCreateWindow: los popunders dejan
+        // de poder secuestrar la página actual (causa de las redirecciones
+        // indeseadas en sitios de vídeo tipo eporner/tnaflix/spankbang)
+        ws.setSupportMultipleWindows(true)
+        ws.javaScriptCanOpenWindowsAutomatically = true
         ws.loadWithOverviewMode = true
         ws.useWideViewPort = true
         ws.cacheMode = WebSettings.LOAD_DEFAULT
@@ -702,6 +720,7 @@ class BrowserActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         w.onResume()
         tabs.forEach { o -> if (o !== t) o.wv?.onPause() }
+        updateShield()
         homeOverlay.visibility = if (t.showHome && t.url.isEmpty()) View.VISIBLE else View.GONE
     }
 
@@ -1394,6 +1413,10 @@ class BrowserActivity : Activity() {
             val t = tabOf(view) ?: return
             val isActive = view === activeWv()
             t.blocked = 0
+            t.popups = 0
+            t.redirects = 0
+            synchronized(t.blockedItems) { t.blockedItems.clear() }
+            if (isActive) updateShield()
             // fusible y aviso de red se reinician en cada carga
             adFuseReq = 0
             adFuseBlk = 0
@@ -1503,6 +1526,40 @@ class BrowserActivity : Activity() {
                 eng.add(u, "", 0, 0, 4, "", true, null) { }
                 return true
             }
+            // Guardia contra redirecciones de anuncio (popunders de sitios de
+            // vídeo): navegación del frame principal SIN toque de usuario y
+            // hacia OTRO dominio base. Los enlaces tocados por el usuario
+            // nunca entran aquí (hitTest con ancla = gesto). Consulta a la
+            // lista de filtros (reglas $popup y ||red-de-anuncios^).
+            try {
+                if (request.isForMainFrame && view != null) {
+                    val cur = view.url ?: ""
+                    if (u.startsWith("http") && cur.startsWith("http")) {
+                        val hit = view.hitTestResult
+                        val userTapped = hit.type != WebView.HitTestResult.UNKNOWN_TYPE
+                        if (!userTapped) {
+                            val hT = hostOf(u)
+                            val hC = hostOf(cur)
+                            if (hT.isNotEmpty() && hT != hC && baseOf(hT) != baseOf(hC)) {
+                                val block = if (AdBlockEngine.ready())
+                                    AdBlockEngine.shouldBlock(cur, u, "popup")
+                                else REDIRECT_HOSTS.any { hT.contains(it) }
+                                if (block) {
+                                    val t = tabOf(view)
+                                    if (t != null) {
+                                        bumpBlocked(t, "↪ $hT${pathOf(u)} — redirección de anuncio")
+                                        synchronized(t) { t.redirects++ }
+                                    }
+                                    toast("Redirección de anuncio bloqueada")
+                                    return true
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                // ni un error detiene la navegación
+            }
             return false
         }
 
@@ -1544,7 +1601,14 @@ class BrowserActivity : Activity() {
                     }
                     if (block) {
                         val t = tabOf(view)
-                        if (t != null) t.blocked++
+                        if (t != null) {
+                            val tipo = AdBlockEngine.typeOf(u)
+                            val regla = if (AdBlockEngine.ready())
+                                AdBlockEngine.ruleFor(view?.url ?: u, u, tipo)
+                            else "lista básica de hosts"
+                            bumpBlocked(t, "${tipoIcono(tipo)} $host${pathOf(u)}" +
+                                (if (regla.isNotEmpty()) " — $regla" else ""))
+                        }
                         return WebResourceResponse(
                             "text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0)))
                     }
@@ -1572,7 +1636,21 @@ class BrowserActivity : Activity() {
         override fun onCreateWindow(
             view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?
         ): Boolean {
-            if (!isUserGesture) return false
+            if (!isUserGesture) {
+                // popunder sin gesto (típico de sitios de vídeo): se bloquea.
+                // Con multipleWindows=true ya NO puede redirigir la página actual.
+                val t = tabOf(view)
+                if (t != null) {
+                    bumpBlocked(t, null)
+                    synchronized(t) { t.popups++ }
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastPopToast > 2500) {
+                    lastPopToast = now
+                    toast("Ventana emergente de anuncio bloqueada")
+                }
+                return true
+            }
             val href = arrayOfNulls<String>(1)
             val tmp = WebView(this@BrowserActivity)
             tmp.webViewClient = object : WebViewClient() {
@@ -1595,6 +1673,84 @@ class BrowserActivity : Activity() {
             }, 500)
             return true
         }
+    }
+
+    // ---------------- escudo de bloqueos (contador + detalles) ----------------
+
+    private var lastPopToast = 0L
+
+    private fun hostOf(u: String): String = try {
+        (java.net.URI(u).host ?: "").lowercase(Locale.US)
+    } catch (e: Exception) { "" }
+
+    /** dominio base aproximado (últimas dos etiquetas) */
+    private fun baseOf(h: String): String {
+        val f = h.indexOf('.')
+        return if (f < 0) h else h.substring(f + 1)
+    }
+
+    private fun pathOf(u: String): String {
+        val noQ = u.substringBefore('?').substringBefore('#')
+        return "/" + noQ.substringAfterLast('/')
+    }
+
+    private fun tipoIcono(tipo: String): String = when (tipo) {
+        "script" -> "📜"
+        "image" -> "🖼"
+        "stylesheet" -> "🎨"
+        "media" -> "🎬"
+        "document" -> "🌐"
+        "font" -> "🔤"
+        else -> "⚙"
+    }
+
+    /** Cuenta un bloqueo y refresca el escudo si la pestaña es la activa. */
+    private fun bumpBlocked(t: Tab, line: String?) {
+        synchronized(t) {
+            t.blocked++
+            if (line != null) {
+                synchronized(t.blockedItems) {
+                    t.blockedItems.add(line)
+                    if (t.blockedItems.size > 120) t.blockedItems.removeAt(0)
+                }
+            }
+        }
+        if (tabs.getOrNull(cur) === t) runOnUiThread { updateShield() }
+    }
+
+    private fun updateShield() {
+        val t = tabs.getOrNull(cur)
+        val n = t?.blocked ?: 0
+        findViewById<Button>(R.id.btnShield).text = if (n > 0) "🛡$n" else "🛡"
+    }
+
+    /** Detalles de lo bloqueado en la página activa (subrecursos, reglas,
+     *  ventanas y redirecciones). */
+    private fun showBlockedDialog() {
+        val t = tabs.getOrNull(cur) ?: return
+        val sb = StringBuilder()
+        val subs = (t.blocked - t.popups - t.redirects).coerceAtLeast(0)
+        sb.append("Subrecursos bloqueados: $subs")
+        if (t.popups > 0) sb.append("\nVentanas emergentes bloqueadas: ${t.popups}")
+        if (t.redirects > 0) sb.append("\nRedirecciones de anuncio bloqueadas: ${t.redirects}")
+        val items = synchronized(t.blockedItems) { t.blockedItems.toList() }
+        val cuerpo = if (items.isEmpty()) {
+            sb.toString() + "\n\nTodavía no se ha bloqueado nada en esta página."
+        } else {
+            sb.toString() + "\n\n" + items.joinToString("\n")
+        }
+        val tv = TextView(this)
+        tv.text = cuerpo
+        tv.textSize = 12f
+        tv.typeface = android.graphics.Typeface.MONOSPACE
+        tv.setPadding(50, 40, 50, 20)
+        val sv = android.widget.ScrollView(this)
+        sv.addView(tv)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("🛡 Bloqueos en esta página")
+            .setView(sv)
+            .setPositiveButton("Cerrar", null)
+            .show()
     }
 
     /** JS idempotente que aplica el CSS cosmético (un solo <style> por página). */
