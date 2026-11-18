@@ -92,7 +92,7 @@ class SettingsActivity : Activity() {
         val about = TextView(this)
         about.text = "TurboDL 3.4.0 · gestor de descargas multipropósito\n" +
                 "HTTP multihilo · FTP · HLS · DASH · BitTorrent · subtítulos · " +
-                "reproductor interno · navegador con pestañas, marcadores y adblock-rust\n" +
+                "reproductor interno · navegador con pestañas, marcadores y bloqueador de anuncios\n" +
                 "Requiere Android 8.0 (API 26). Pensado para equipos de " +
                 "1 GB de RAM: sin AndroidX, pool de hilos acotado y WebView único.\n" +
                 "Gratis, sin anuncios ni suscripciones."
@@ -110,7 +110,7 @@ class SettingsActivity : Activity() {
     }
 
     private fun adblockText(): String = when {
-        com.turbodl.engine.AdBlockEngine.ready() -> "motor Rust activo (EasyList + EasyPrivacy)"
+        com.turbodl.engine.AdBlockEngine.ready() -> "bloqueador Kotlin activo (EasyList + EasyPrivacy)"
         com.turbodl.engine.AdBlockEngine.caido() -> "motor no disponible: lista básica de hosts"
         else -> "cargando motor…"
     }

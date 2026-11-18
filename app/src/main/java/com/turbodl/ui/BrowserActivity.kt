@@ -321,7 +321,7 @@ class BrowserActivity : Activity() {
 
         CookieManager.getInstance().setAcceptCookie(true)
 
-        // motor de bloqueo adblock-rust: por si la app se abrió directo aquí
+        // motor de bloqueo: por si la app se abrió directo aquí
         // (App.onCreate ya lo inicializa con el bloqueador activado)
         if (AdBlockEngine.activado(applicationContext)) {
             AdBlockEngine.ensure(applicationContext)
@@ -1512,8 +1512,8 @@ class BrowserActivity : Activity() {
             val u = request?.url?.toString() ?: return null
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
                 addDetected(Kit.normalizeSniffUrl(u), "req")
-            // bloqueador de anuncios: motor adblock-rust (EasyList + EasyPrivacy,
-            // cosmetico y scriptlets); si aun no esta listo o fallo, cae a la
+            // bloqueador de anuncios: motor 100% Kotlin (EasyList + EasyPrivacy,
+            // semantica EasyList); si aun no esta listo o fallo, cae a la
             // lista compacta de hosts que existia antes. Nunca debe lanzar:
             // try(Throwable) para que ni un Error detenga la navegacion.
             // El FRAME PRINCIPAL nunca se bloquea: una regla que pifie la

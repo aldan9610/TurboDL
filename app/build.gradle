@@ -9,15 +9,14 @@ android {
 
     defaultConfig {
         applicationId "com.turbodl"
-        // minSdk 26 = Android 8.0: requisito del motor de bloqueo de anuncios
-        // adblock-rust (libs/adblock-0.1.3.aar); Android 5.x-7.x ya no tiene
-        // WebView actualizable ni cuota relevante
+        // minSdk 26 = Android 8.0: WebView actualizable (base del navegador);
+        // Android 5.x-7.x ya no la tienen ni tienen cuota relevante.
+        // El bloqueador de anuncios es 100% Kotlin desde la 3.6.0: sin JNI,
+        // sin código nativo y sin requisitos de minSdk extra.
         minSdk 26
         targetSdk 34
-        versionCode 11
-        versionName "3.5.2"
-        // Solo arquitecturas de telefonos reales (ahorro de tamano y RAM)
-        ndk { abiFilters 'armeabi-v7a', 'arm64-v8a' }
+        versionCode 12
+        versionName "3.6.0"
     }
 
     signingConfigs {
@@ -66,4 +65,6 @@ dependencies {
     //   kotlin-stdlib-1.9.24.jar / jlibtorrent-1.2.0.18.aar (BitTorrent, nativos en jniLibs)
     //   isoparser-1.9.56.jar + slf4j-api-1.7.36.jar (fusion audio+video)
     implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])
+    // JUnit solo para los tests JVM del motor de bloqueo (no entra en el APK)
+    testImplementation 'junit:junit:4.13.2'
 }

@@ -6,8 +6,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import org.mlm.adblock.AdblockEngine;
-import org.mlm.adblock.CosmeticResources;
+import com.turbodl.adblock.FilterEngine;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -18,39 +17,40 @@ import java.net.URL;
 import java.util.Locale;
 
 /**
- * Motor de bloqueo de anuncios basado en adblock-rust (el mismo motor del
- * navegador Brave), vendido como libs/adblock-0.1.3.aar con JNI nativo.
+ * Fachada del bloqueador de anuncios. Desde la 3.6.0 el motor es 100%
+ * Kotlin (com.turbodl.adblock.FilterEngine, sin JNI ni código nativo) y las
+ * listas son EasyList / EasyPrivacy (assets/adblock), la parte madura y
+ * mantenida desde hace más de 15 años por easylist.to. El AAR adblock-rust
+ * que se usó en 3.4.0-3.5.2 se ELIMINÓ por completo: en móviles de poca RAM
+ * su memoria nativa (90-165 MB) estrangulaba al renderizador del WebView.
  *
- * - Filtrado de red completo: EasyList (+ EasyPrivacy si hay RAM), reglas
- *   $script/$image/$third-party/$redirect y excepciones @@.
- * - Filtrado cosmético: CSS para ocultar huecos de anuncios por página.
- * - Scriptlets y recursos $redirect de Brave (assets/adblock/resources.json).
+ * - Filtrado de red: ||host^, comodines, ^, anclas, $script/$image/...,
+ *   $third-party, $domain=, @@ y $important (semántica EasyList).
+ * - Filtrado cosmético: selectores ## por dominio + genéricos con límite
+ *   de tamaño, respetando #@# y las excepciones $elemhide/$generichide.
+ * - El filtro aplica SOLO a subrecursos (el frame principal nunca se
+ *   bloquea; lo garantiza BrowserActivity).
  *
- * ROBUSTEZ (v3.5.0, tras el crash en telefono sin conexión):
- * - TODOS los accesos al motor usan catch(Throwable): un UnsatisfiedLinkError
- *   o NoClassDefFoundError (que son Error, no Exception) degrada el motor a
- *   la lista compacta de hosts en vez de matar el proceso.
- * - Nunca se llama al nativo con URLs que no sean http/https (about:blank,
- *   chrome-error://chromewebdata/ de las páginas de error, data:, file:):
- *   el JNI las rechaza con una RuntimeException, pero se evitan del todo.
- * - El CSS cosmético se calcula FUERA del hilo principal y se LIMITA a
- *   256 KB: los selectores genéricos de EasyList pueden ser megas y
- *   construirlos en el hilo UI provocaba OutOfMemoryError (Error sin
- *   capturar -> crash), sobre todo en páginas de error sin conexión.
- * - Un self-test con URLs limpias valida el motor antes de marcarlo READY.
- * - MODO POR RAM (medido con el motor real: EasyList ≈90 MB, ambas ≈165 MB):
- *   < 2 GB no carga el motor nativo (solo lista de hosts, memoria casi nula);
- *   2-3 GB solo EasyList (engine-lite.bin); >= 3 GB ambas listas
- *   (engine-full.bin). En un teléfono de 1 GB el motor estrangulaba al
- *   renderizador del WebView y las páginas quedaban en blanco.
- * - Un NATIVE_LOCK serializa llamadas nativas y sustituciones del motor
- *   (updateLists) para evitar use-after-free al cerrar el motor en uso.
+ * ROBUSTEZ (se conserva de las 3.5.x):
+ * - Todos los accesos al motor van con catch(Throwable): ningún Error
+ *   detiene la navegación.
+ * - Nunca se piden URLs que no sean http/https (about:blank,
+ *   chrome-error://, data:, file:).
+ * - El CSS cosmético se calcula fuera del hilo principal y se LIMITA a
+ *   256 KB.
+ * - Self-test con URLs limpias antes de marcar READY; si falla, el
+ *   navegador usa la lista compacta de hosts (AD_HOSTS).
+ * - MODO POR RAM: < 1,5 GB solo EasyList (lite, ~10 MB); en adelante
+ *   EasyList + EasyPrivacy (~20 MB). Nada comparable a los 90-165 MB del
+ *   motor nativo.
+ * - Un fusible del navegador pausa el motor si bloqueara una proporción
+ *   anómala de peticiones.
  * - ensure() solo se llama con el bloqueador ACTIVADO; la inicialización
  *   ocurre en el arranque de la app (App.onCreate), lejos de la creación
- *   del WebView del navegador.
+ *   del WebView.
  *
- * Las listas van INTEGRADAS en el APK (assets/adblock): no hace falta
- * conexión la primera vez; Ajustes permite actualizarlas de easylist.to.
+ * Las listas van INTEGRADAS en el APK: no hace falta conexión la primera
+ * vez; Ajustes permite actualizarlas de easylist.to.
  */
 public final class AdBlockEngine {
 
@@ -64,11 +64,10 @@ public final class AdBlockEngine {
     private static final int CSS_MAX = 256 * 1024; // cap del CSS cosmético
 
     private static volatile int state = STATE_INIT;
-    private static volatile AdblockEngine engine = null;
+    private static volatile FilterEngine engine = null;
     private static final Object LOCK = new Object();
-    private static final Object NATIVE_LOCK = new Object();
 
-    /** false = modo lite (2-3 GB RAM): solo EasyList. */
+    /** false = modo lite (< 1,5 GB RAM): solo EasyList. */
     private static volatile boolean fullLists = true;
 
     /** Motivo por el que el motor no está disponible (para diagnóstico). */
@@ -106,58 +105,28 @@ public final class AdBlockEngine {
         }
     }
 
-    /**
-     * Modo según la RAM TOTAL del dispositivo, medido con el motor real:
-     *   < 2 GB  -> 0 (SIN motor nativo: consume ~90 MB+ y en un teléfono de
-     *                   1 GB estrangula al renderizador del WebView, que queda
-     *                   en blanco; la lista de hosts bloquea lo esencial con
-     *                   memoria casi nula — así funcionaba la 3.3.0)
-     *   2-3 GB  -> 1 (lite: solo EasyList, ~90 MB)
-     *   >= 3 GB -> 2 (full: EasyList+EasyPrivacy, ~165 MB)
-     */
-    private static int modoRam(Context ctx) {
+    /** Equipos humildes: solo EasyList (el motor Kotlin es ligero, pero
+     *  EasyPrivacy añade ~10 MB de reglas que en 1 GB no valen la pena). */
+    private static boolean esLowRam(Context ctx) {
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
-            if (am == null) return 1;
+            if (am == null) return false;
             ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
             am.getMemoryInfo(mi);
-            if (mi.totalMem < 2000L * 1024 * 1024) return 0;
-            if (mi.totalMem < 3000L * 1024 * 1024) return 1;
-            return 2;
+            return mi.totalMem < 1500L * 1024 * 1024;
         } catch (Throwable e) {
-            return 1;
+            return false;
         }
     }
 
     private static void init(Context ctx) throws Exception {
-        int modoR = modoRam(ctx);
-        if (modoR == 0) {
-            synchronized (LOCK) {
-                state = STATE_FALLIDO;
-                motivo = "RAM total < 2 GB: motor nativo desactivado "
-                    + "(solo lista básica de hosts)";
-            }
-            Log.w("AdBlockEngine", motivo);
-            return;
-        }
-        fullLists = modoR == 2;
+        fullLists = !esLowRam(ctx);
         File d = dir(ctx);
         d.mkdirs();
-        // modo persistido para invalidar el cache si cambia lite<->full
-        String modo = fullLists ? "full" : "lite";
-        try {
-            File mf = new File(d, "mode.txt");
-            String prev = mf.exists()
-                ? new String(java.nio.file.Files.readAllBytes(mf.toPath()),
-                    java.nio.charset.StandardCharsets.UTF_8).trim()
-                : "";
-            if (!prev.equals(modo)) {
-                new File(d, cacheName()).delete();
-                FileOutputStream fo = new FileOutputStream(mf);
-                fo.write(modo.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                fo.close();
-            }
-        } catch (Throwable e) { }
+        // limpieza del legado del motor Rust: cache serializado ya sin uso
+        for (String legado : new String[]{"engine-full.bin", "engine-lite.bin", "mode.txt"}) {
+            try { new File(d, legado).delete(); } catch (Throwable e) { }
+        }
         for (String n : LISTAS) {
             File f = new File(d, n);
             if (!f.exists() || f.length() < 1000) {
@@ -169,72 +138,36 @@ public final class AdBlockEngine {
                 }
             }
         }
-        AdblockEngine eng;
+        FilterEngine eng = new FilterEngine();
+        StringBuilder sb = new StringBuilder();
+        int n = fullLists ? LISTAS.length : 1; // lite: solo EasyList
+        for (int i = 0; i < n; i++) {
+            sb.append(new String(java.nio.file.Files.readAllBytes(
+                new File(d, LISTAS[i]).toPath()), java.nio.charset.StandardCharsets.UTF_8));
+            sb.append('\n');
+        }
+        boolean ok;
         try {
-            eng = AdblockEngine.Companion.create();
+            ok = eng.parse(sb.toString()) > 0;
         } catch (Throwable e) {
-            fallo(e); // UnsatisfiedLinkError etc.
+            fallo(e);
             return;
         }
-        File bin = new File(d, cacheName());
-        boolean ok = false;
-        if (bin.exists() && bin.length() > 100000) {
-            // arranque rápido: estado serializado del motor
-            try {
-                synchronized (NATIVE_LOCK) { ok = eng.deserializeFrom(bin); }
-            } catch (Throwable e) { ok = false; }
-        }
-        if (!ok) {
-            StringBuilder sb = new StringBuilder();
-            int n = fullLists ? LISTAS.length : 1; // lite: solo EasyList
-            for (int i = 0; i < n; i++) {
-                if (sb.length() > 0) sb.append('\n');
-                sb.append(new String(java.nio.file.Files.readAllBytes(
-                    new File(d, LISTAS[i]).toPath()), java.nio.charset.StandardCharsets.UTF_8));
-            }
-            try {
-                synchronized (NATIVE_LOCK) { ok = eng.loadFilterList(sb.toString()); }
-            } catch (Throwable e) {
-                fallo(e);
-                return;
-            }
-            if (ok) {
-                try {
-                    synchronized (NATIVE_LOCK) { eng.serializeTo(bin); }
-                } catch (Throwable e) { /* cache opcional */ }
-            }
-        }
         if (ok) {
-            // scriptlets y $redirect (recursos tipo Brave incluidos en el AAR)
-            try {
-                InputStream is = ctx.getAssets().open("adblock/resources.json");
-                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
-                byte[] buf = new byte[32 * 1024];
-                int r;
-                while ((r = is.read(buf)) > 0) bo.write(buf, 0, r);
-                is.close();
-                synchronized (NATIVE_LOCK) { eng.loadResources(bo.toString("UTF-8")); }
-            } catch (Throwable e) { /* opcional */ }
             // self-test con URLs limpias: si el motor no responde bien,
             // no se marca READY y el navegador usa la lista de hosts
             boolean test;
             try {
-                synchronized (NATIVE_LOCK) {
-                    // orden del wrapper: (url=RECURSO, sourceUrl=PÁGINA, tipo)
-                    test = eng.shouldBlock(
-                        "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
-                        "https://www.ejemplo.com/",
-                        "script")
-                        && !eng.shouldBlock(
-                        "https://www.ejemplo.com/css/main.css",
-                        "https://www.ejemplo.com/",
-                        "stylesheet");
-                }
+                test = eng.shouldBlock(
+                    "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                    "https://www.ejemplo.com/", "script")
+                    && !eng.shouldBlock(
+                    "https://www.ejemplo.com/css/main.css",
+                    "https://www.ejemplo.com/", "stylesheet");
             } catch (Throwable e) {
                 test = false;
             }
             if (!test) {
-                try { eng.close(); } catch (Throwable e) { }
                 state = STATE_FALLIDO;
                 motivo = "self-test falló: usando lista de hosts";
                 Log.w("AdBlockEngine", motivo);
@@ -245,28 +178,20 @@ public final class AdBlockEngine {
                 state = STATE_READY;
             }
         } else {
-            fallo(new Exception("loadFilterList devolvió false"));
+            fallo(new Exception("las listas no produjeron reglas"));
         }
-    }
-
-    private static String cacheName() {
-        return fullLists ? "engine-full.bin" : "engine-lite.bin";
     }
 
     private static void fallo(Throwable e) {
         synchronized (LOCK) {
             state = STATE_FALLIDO;
             motivo = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            AdblockEngine eng = engine;
-            engine = null;           // primero fuera de alcance...
-            if (eng != null) {
-                try { eng.close(); } catch (Throwable e2) { } // ...después close
-            }
+            engine = null;
         }
-        Log.w("AdBlockEngine", "motor nativo no disponible: " + e);
+        Log.w("AdBlockEngine", "motor no disponible: " + e);
     }
 
-    /** true si el motor Rust está listo; false = usar el fallback de hosts. */
+    /** true si el motor está listo; false = usar el fallback de hosts. */
     public static boolean ready() {
         return state == STATE_READY && engine != null;
     }
@@ -294,15 +219,17 @@ public final class AdBlockEngine {
             return sb.toString();
         }
         if (state == STATE_READY) {
-            sb.append("- Motor Rust: LISTO (")
-                .append(fullLists ? "EasyList + EasyPrivacy" : "solo EasyList")
-                .append(")\n");
+            FilterEngine eng = engine;
+            sb.append("- Motor: KOTLIN LISTO (")
+                .append(fullLists ? "EasyList + EasyPrivacy" : "solo EasyList");
+            if (eng != null) sb.append(", ").append(eng.getNetworkRules()).append(" reglas");
+            sb.append(")\n");
         } else if (state == STATE_FALLIDO) {
-            sb.append("- Motor Rust: NO EN USO (")
+            sb.append("- Motor: NO EN USO (")
                 .append(motivo == null || motivo.isEmpty() ? "no disponible" : motivo)
                 .append(")\n- Filtrando con la lista básica de hosts (≈0 MB de RAM)\n");
         } else {
-            sb.append("- Motor Rust: cargando…\n");
+            sb.append("- Motor: cargando…\n");
         }
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
@@ -321,49 +248,37 @@ public final class AdBlockEngine {
         return url != null && (url.startsWith("http://") || url.startsWith("https://"));
     }
 
+    /**
+     * true si el subrecurso debe bloquearse. Sin motor (no listo o caído)
+     * devuelve false SIEMPRE: fallar es dejar pasar, no bloquear de más.
+     */
     public static boolean shouldBlock(String pageUrl, String reqUrl, String type) {
-        AdblockEngine eng = engine;
+        FilterEngine eng = engine;
         if (eng == null || !httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return false;
         try {
-            synchronized (NATIVE_LOCK) {
-                // ORDEN DEL WRAPPER (verificado en el fuente Kotlin y probado
-                // con las bindings Python del mismo crate): shouldBlock(url,
-                // sourceUrl, type) donde url = RECURSO pedido y sourceUrl =
-                // PÁGINA. En 3.5.0 se enviaron invertidos y el motor quedó
-                // inerte (0 bloqueos, comprobado empíricamente).
-                return eng.shouldBlock(reqUrl, pageUrl, type);
-            }
+            // orden del motor: (recurso pedido, página, tipo). El frame
+            // principal nunca llega aquí (lo excluye BrowserActivity).
+            return eng.shouldBlock(reqUrl, pageUrl, type);
         } catch (Throwable e) {
             return false;
         }
     }
 
     /** CSS cosmético (ocultar elementos) para la página; vacío si no hay.
-     *  Llamar desde un hilo de fondo: puede tardar y devolver cientos de KB. */
+     *  Llamar desde un hilo de fondo; se limita a 256 KB. */
     public static String cssFor(String pageUrl) {
-        AdblockEngine eng = engine;
+        FilterEngine eng = engine;
         if (eng == null || !httpLimpia(pageUrl)) return "";
         try {
-            CosmeticResources cr;
-            synchronized (NATIVE_LOCK) {
-                cr = eng.cosmeticResources(pageUrl);
-            }
-            if (cr == null) return "";
-            String css = cr.css();
-            // cap: selectores genéricos de EasyList pueden ser megas; si
-            // desborda, se recorta por líneas para no reventar el heap
-            if (css == null || css.isEmpty()) return "";
-            if (css.length() > CSS_MAX) {
-                int cut = css.lastIndexOf('\n', CSS_MAX);
-                css = cut > 1000 ? css.substring(0, cut) : "";
-            }
+            String css = eng.cssFor(pageUrl, CSS_MAX);
+            if (css == null) return "";
             return css;
         } catch (Throwable e) {
             return "";
         }
     }
 
-    /** Tipo de recurso adblock-rust deducido de la URL. */
+    /** Tipo de recurso para el motor, deducido de la URL. */
     public static String typeOf(String url) {
         String u = url.split("\\?")[0].split("#")[0].toLowerCase(Locale.US);
         if (u.endsWith(".js")) return "script";
@@ -377,8 +292,8 @@ public final class AdBlockEngine {
     }
 
     /**
-     * Descarga listas frescas de easylist.to, borra el estado serializado y
-     * reconstruye el motor. cb(ok, msg) llega en el hilo principal.
+     * Descarga listas frescas de easylist.to y reconstruye el motor.
+     * cb(ok, msg) llega en el hilo principal.
      */
     public static void updateLists(Context ctx, Cb cb) {
         Thread t = new Thread(() -> {
@@ -398,15 +313,8 @@ public final class AdBlockEngine {
             try {
                 synchronized (LOCK) {
                     state = STATE_INIT;
-                    AdblockEngine eng = engine;
                     engine = null;
-                    if (eng != null) {
-                        try {
-                            synchronized (NATIVE_LOCK) { eng.close(); }
-                        } catch (Throwable e) { }
-                    }
                 }
-                new File(dir(ctx), cacheName()).delete();
                 init(ctx);
                 final boolean listo = ready();
                 uiPost(() -> cb.on(listo, listo
@@ -431,7 +339,7 @@ public final class AdBlockEngine {
             conn = (HttpURLConnection) new URL(url).openConnection();
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(15000);
-            conn.setRequestProperty("User-Agent", "TurboDL/3.5");
+            conn.setRequestProperty("User-Agent", "TurboDL/3.6");
             if (conn.getResponseCode() < 200 || conn.getResponseCode() > 299) return false;
             File tmp = new File(dest.getParentFile(), dest.getName() + ".tmp");
             try (InputStream in = conn.getInputStream();

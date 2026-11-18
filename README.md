@@ -1,10 +1,48 @@
-# TurboDL 3.5.2
+# TurboDL 3.6.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
-motor de bloqueo de anuncios en Rust vendido como AAR).
+motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 3.6.0 — bloqueador 100 % Kotlin (adiós al Rust)
+
+A petición: se ELIMINÓ por completo el bloqueador en Rust y se sustituyó por
+un motor **100 % Kotlin** integrado en la app.
+
+- **Sin Rust**: fuera el AAR `adblock-0.1.3`, sus 4 librerías nativas, las
+  entradas JNI y las reglas ProGuard. El APK pasa de ~20 MB a ~15 MB y la app
+  ya no carga ni un binario nativo para el bloqueo.
+- **Motor nuevo `FilterEngine` (Kotlin puro)** en `com.turbodl.adblock`:
+  semántica EasyList — `||host^`, comodines `*`, separador `^` (incluye el
+  final de la URL), anclas `|…|`, `$script/$image/$stylesheet/$media/$font/
+  $xmlhttprequest/…`, `$third-party/$first-party` (dominio base), `$domain=`,
+  `$denyallow=`, `$to=`, `$important`, excepciones `@@`, y ocultación de
+  elementos `##` por dominio y genérica con excepciones `#@#` y
+  `$elemhide/$generichide`.
+- **Por qué propio y no una librería**: se investigó el ecosistema y no
+  existe una librería mantenida de motor EasyList en Kotlin/Java puro (eyeo
+  es C++/JNI y está parada desde 2017; AdGuard es TypeScript). La parte
+  MADURA y mantenida del bloqueo son las LISTAS (EasyList + EasyPrivacy,
+  integradas en el APK y actualizables desde Ajustes); el motor compacto es
+  nuestro y está probado con JUnit contra las listas reales.
+- **Índice por dominio**: ~48.000 dominios en HashMap y las genéricas
+  agrupadas por su literal más largo; sin regex en el camino caliente.
+  RAM típica ~10 MB (solo EasyList en móviles < 1,5 GB) frente a los
+  90-165 MB nativos del motor anterior.
+- **Robustez conservada**: el frame principal nunca se bloquea; fail-open
+  (si el motor falla, deja pasar y avisa); fusible anti-sobre-bloqueo;
+  CSS cosmético limitado y calculado fuera del hilo UI; panel de
+  diagnóstico actualizado («Motor: KOTLIN LISTO, N reglas»).
+- **Tests JUnit (13) contra las listas REALES**: subrecursos legítimos de
+  YouTube/Google/Facebook/X/Reddit/Wikipedia… **0 bloqueados**, anuncios y
+  rastreadores (doubleclick, googlesyndication, taboola, analytics…) sí,
+  y rendimiento por petición con margen. Durante el desarrollo los tests
+  cazaron tres bugs graves del primer borrador (matcher que no completaba
+  coincidencias, subdominios hermanos tratados como third-party y una regla
+  `*$ping,third-party` que sin el bit de «tipo desconocido» habría bloqueado
+  TODO lo third-party) — exactamente el tipo de error que envenenó la 3.4.x.
 
 ## Novedades de la 3.5.2 — compatibilidad con móviles de poca RAM
 

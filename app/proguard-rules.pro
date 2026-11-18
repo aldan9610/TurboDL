@@ -43,8 +43,4 @@
 # El parseo XML de Mpd.java usa javax.xml (framework, no se toca)
 -dontwarn javax.xml.**
 
-# --- adblock-rust (motor Brave via JNI, vendido en libs/adblock-0.1.3.aar) ---
-# Entradas JNI del binding Kotlin<->Rust: si R8 renombra, el .so no encuentra
-# los metodos nativos y el motor no arranca (el AAR trae reglas, se reafirman).
--keep class org.mlm.adblock.** { *; }
--dontwarn org.mlm.adblock.**
+# (el motor de bloqueo es 100% Kotlin desde la 3.6.0: sin JNI, sin keeps)
