@@ -17,6 +17,13 @@
     <!-- Auto-actualización desde GitHub Releases (instalación de APK oficial) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- 4.1: características opcionales declaradas como NO requeridas, para que
+         la app se instale también en tablets sin teléfono/cámara/GPS. Sin
+         esto, Google Play filtra el APK por hardware en algunos fabricantes. -->
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.location" android:required="false" />
+
     <application
         android:name=".App"
         android:allowBackup="true"
@@ -35,23 +42,31 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Recibir URLs compartidas desde otras apps -->
+            <!-- 4.1: gestor de descargas externo — otras apps comparten un
+                 enlace (ACTION_SEND con texto) y TurboDL aparece en el
+                 chooser. Es la vía estándar para "Compartir enlace" desde
+                 cualquier navegador, red social o lector de QR. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
-            <!-- Enlaces http/https: hace que TurboDL aparezca registrada como
-                 gestor de descargas en el chooser de otras apps/navegadores
-                 (igual que 1DM o Gopeed) -->
-            <intent-filter>
+            <!-- 4.1: la app también aparece en el chooser de enlaces
+                 http/https como GESTOR DE DESCARGAS (junto al navegador
+                 BrowserActivity). El usuario decide: "Abrir en TurboDL"
+                 (esta Activity) lo añade a la cola de descargas; "Abrir en
+                 navegador" (BrowserActivity) lo abre. Igual que 1DM/Gopeed. -->
+            <intent-filter
+                android:label="@string/app_full"
+                android:icon="@mipmap/ic_launcher"
+                android:priority="1">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="http" />
                 <data android:scheme="https" />
             </intent-filter>
-            <!-- Abrir magnet / torrent desde otras apps -->
+            <!-- Abrir magnet / torrent desde otras apps: van a la cola -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -68,12 +83,58 @@
             </intent-filter>
         </activity>
 
+        <!-- 4.1: BrowserActivity ahora es EXPORTED y declara intent-filters
+             para que el sistema Android la reconozca como NAVEGADOR
+             disponible (categoría APP_BROWSER + BROWSABLE + http/https).
+             Aparece en Ajustes > Apps > Aplicaciones predeterminadas >
+             Navegador, y al tocar un enlace http/https en cualquier app
+             el usuario puede elegirla. -->
         <activity
             android:name=".ui.BrowserActivity"
-            android:exported="false"
+            android:exported="true"
+            android:launchMode="singleTask"
             android:supportsPictureInPicture="true"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout" />
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+            <!-- Navegador del sistema: al tocar un enlace http/https en
+                 Gmail, WhatsApp, Keep Notes… el chooser ofrece TurboDL
+                 junto a Chrome/Firefox. Si el usuario la elige "Siempre",
+                 se convierte en el navegador por defecto del teléfono. -->
+            <intent-filter
+                android:label="@string/app_name"
+                android:icon="@mipmap/ic_launcher">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <category android:name="android.intent.category.APP_BROWSER" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+            <!-- Recibir URLs compartidas desde otras apps: igual que
+                 MainActivity, pero abre la URL en el navegador en lugar de
+                 mandarla a la cola. Permite "Compartir enlace → Abrir en
+                 navegador TurboDL". -->
+            <intent-filter
+                android:label="@string/app_name"
+                android:icon="@mipmap/ic_launcher">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Búsqueda web desde el asistente de Google / búsqueda por voz:
+                 "Buscar X" abre el navegador TurboDL con la búsqueda. -->
+            <intent-filter>
+                <action android:name="android.intent.action.WEB_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Texto plano seleccionado en otra app → "Abrir en TurboDL"
+                 (igual que "Buscar en Google"). -->
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".ui.SettingsActivity"

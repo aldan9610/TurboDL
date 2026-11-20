@@ -3,6 +3,7 @@ package com.turbodl.ui
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.SearchManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -107,6 +108,41 @@ class BrowserActivity : Activity() {
         /** Identificador único por pestaña: asocia las capturas de medios
          *  a su pestaña aunque el WebView se recree. */
         private var tabSeq = 0L
+
+        // Colores centralizados de la interfaz (4.0): sustituyen a los
+        // literales hex 0xFF212121 / 0xFF1565C0 / 0xFF3A3A3A repartidos por
+        // toda la clase, para que un cambio de paleta se haga en un punto.
+        /** Color de acento (azul) para elementos activos/seleccionados. */
+        internal val COLOR_ACCENT = 0xFF1565C0.toInt()
+        /** Color principal del texto sobre fondo claro. */
+        internal val COLOR_TEXT_PRIMARY = 0xFF212121.toInt()
+        /** Color secundario del texto (etiquetas, descripciones). */
+        internal val COLOR_TEXT_SECONDARY = 0xFF3A3A3A.toInt()
+        /** Gris medio para hints y texto deshabilitado. */
+        internal val COLOR_TEXT_HINT = 0xFF9E9E9E.toInt()
+        /** Naranja de acento (colorPrimary del tema) para indicadores activos. */
+        internal val COLOR_ORANGE = 0xFFFF6D00.toInt()
+        /** Gris claro para puntos inactivos del paginador. */
+        internal val COLOR_DOT_OFF = 0xFFCCCCCC.toInt()
+
+        // ---------------- menú inferior paginado (4.0) ----------------
+        // BUG 1: antes el menú asumaba 2 páginas; aquí se declaran como
+        // constantes para que añadir/eliminar páginas no exija tocar todos
+        // los `for (i in 0 until 3)` repartidos por la clase.
+        /** Número de páginas (submenús) del menú inferior. */
+        internal const val MENU_PAGE_COUNT = 3
+        /** Columnas por página del menú (5 iconos por fila, como Via Browser). */
+        internal const val MENU_COLUMNS = 5
+        /** Filas por página del menú (10 acciones por página). */
+        internal const val MENU_ROWS = 2
+
+        // ---------------- paneles de accesos directos (4.0) ----------------
+        /** Número de paneles de accesos (Comunes / IA / Mis sitios). */
+        internal const val SITES_PANEL_COUNT = 3
+        /** Columnas de cada panel de accesos (4 por fila, estilo launchador). */
+        internal const val SITES_COLUMNS = 4
+        /** Filas visibles por panel antes de scroll vertical. */
+        internal const val SITES_ROWS_VISIBLE = 3
 
         private val MEDIA_RE = Regex(
             "\\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\\?|$)",
@@ -543,6 +579,34 @@ class BrowserActivity : Activity() {
                     if ((s?.length ?: 0) > 0) View.VISIBLE else View.GONE
             }
         })
+        // BUG 4 (informado por el usuario): "una vez ya realizada la búsqueda
+        // al hacer click nuevamente no se elimina por defecto la URL donde
+        // estoy algo que estropea la navegación rápida, quiero que esto
+        // pase pero manteniendo la posibilidad de compartir enlace y copiar
+        // URL al dejar presionado sobre esa".
+        //
+        // Solución:
+        //  · TOQUE simple sobre la barra: si hay una URL cargada, la
+        //    seleccionamos TODA y pedimos foco + teclado. Así, al escribir,
+        //    el primer carácter sustituye la URL entera (navegación rápida).
+        //    Si el campo está vacío no hacemos nada (el foco normal basta).
+        //  · PULSACIÓN LARGA sobre la barra: menú contextual "Compartir
+        //    enlace" / "Copiar URL" — se mantiene la posibilidad de copiar y
+        //    compartir la URL actual sin necesidad de tocar el campo.
+        editUrl.setOnClickListener {
+            val currentUrl = editUrl.text?.toString() ?: ""
+            if (currentUrl.isNotEmpty()) {
+                // Selecciona todo el texto: el siguiente carácter escrito
+                // reemplaza la URL (mismo comportamiento que Chrome/Firefox).
+                editUrl.selectAll()
+                editUrl.requestFocus()
+                showKb()
+            }
+        }
+        editUrl.setOnLongClickListener {
+            showUrlContextMenu()
+            true
+        }
         setupHistoryBar()
 
         // buscador grande de la página de inicio (estilo 4.0)
@@ -600,7 +664,7 @@ class BrowserActivity : Activity() {
         // 4.0 U9: título del panel activo al deslizar los accesos
         sitesPager.setOnScrollChangeListener { _, sx, _, _, _ ->
             val w = sitesPager.width.coerceAtLeast(1)
-            val np = Math.round(sx / w.toFloat()).coerceIn(0, 2)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0, SITES_PANEL_COUNT - 1)
             if (np != sitesPage) {
                 sitesPage = np
                 renderSitesDots()
@@ -610,7 +674,7 @@ class BrowserActivity : Activity() {
         // 4.0 U3: página activa del menú al deslizar
         menuPager.setOnScrollChangeListener { _, sx, _, _, _ ->
             val w = menuPager.width.coerceAtLeast(1)
-            val np = Math.round(sx / w.toFloat()).coerceIn(0, 2)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0, MENU_PAGE_COUNT - 1)
             if (np != menuPage) {
                 menuPage = np
                 renderMenuDots()
@@ -623,9 +687,88 @@ class BrowserActivity : Activity() {
         updateDetectBtn()
         showHome(true)
 
-        // llegada directa con URL (p.ej. "abrir en navegador" desde el inicio)
-        val openUrl = intent?.getStringExtra("openUrl")
-        if (!openUrl.isNullOrEmpty()) load(openUrl)
+        // 4.1: procesar el intent con el que nos lanzaron (desde el sistema
+        // u otra app). Cubre ACTION_VIEW (enlace http/https abierto desde
+        // Gmail/WhatsApp), ACTION_SEND (URL compartida), PROCESS_TEXT
+        // (texto seleccionado → "Abrir en TurboDL"), WEB_SEARCH (búsqueda
+        // del asistente) y el extra interno "openUrl" (de MainActivity).
+        handleExternalIntent(intent)
+    }
+
+    /**
+     * Procesa el intent con el que otra app abrió el navegador (4.1).
+     *
+     * Tipos de intent soportados:
+     *  - ACTION_VIEW con data http/https  → carga la URL.
+     *  - ACTION_SEND con EXTRA_TEXT        → busca la primera URL del
+     *    texto compartido y la carga; si no hay URL, hace búsqueda web.
+     *  - ACTION_PROCESS_TEXT               → búsqueda web del texto
+     *    seleccionado (igual que "Buscar en Google").
+     *  - ACTION_WEB_SEARCH                → búsqueda web del QUERY.
+     *  - Extra "openUrl"                   → usado por MainActivity para
+     *    "Abrir en navegador".
+     *
+     * Si el intent no lleva URL ni texto, no hace nada (queda en la
+     * página de inicio).
+     */
+    private fun handleExternalIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        // 1) Extra interno "openUrl" (de MainActivity): prioridad alta,
+        //    porque significa que el usuario ya eligió abrir en navegador.
+        val openUrl = intent.getStringExtra("openUrl")
+        if (!openUrl.isNullOrEmpty()) { load(openUrl); return }
+        when (intent.action) {
+            android.content.Intent.ACTION_VIEW -> {
+                // Enlace http/https abierto por el sistema.
+                val data = intent.dataString ?: ""
+                if (data.isNotEmpty() && (data.startsWith("http") ||
+                            data.startsWith("magnet") || data.contains("://"))) {
+                    load(data)
+                }
+            }
+            android.content.Intent.ACTION_SEND -> {
+                // URL compartida desde otra app ("Compartir enlace").
+                val text = intent.getStringExtra(android.content.Intent.EXTRA_TEXT) ?: ""
+                val url = text.split(Regex("\\s+")).firstOrNull {
+                    it.startsWith("http") || it.startsWith("magnet") || it.contains("://")
+                } ?: ""
+                if (url.isNotEmpty()) load(url)
+                else if (text.trim().isNotEmpty()) {
+                    // No es URL: hacer búsqueda web del texto compartido.
+                    load(Profiles.engineUrl(eng.sp, text.trim()))
+                }
+            }
+            android.content.Intent.ACTION_PROCESS_TEXT -> {
+                // Texto seleccionado en otra app → "Abrir en TurboDL".
+                val text = intent.getStringExtra(android.content.Intent.EXTRA_PROCESS_TEXT) ?: ""
+                if (text.trim().isNotEmpty()) {
+                    // Si parece URL, navegar; si no, buscar.
+                    if (text.contains("://") || text.contains(".")) {
+                        load(if (text.contains("://")) text else "https://$text")
+                    } else {
+                        load(Profiles.engineUrl(eng.sp, text.trim()))
+                    }
+                }
+            }
+            android.content.Intent.ACTION_WEB_SEARCH -> {
+                // Búsqueda del asistente de Google.
+                val query = intent.getStringExtra(SearchManager.QUERY) ?: ""
+                if (query.trim().isNotEmpty()) {
+                    load(Profiles.engineUrl(eng.sp, query.trim()))
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        // 4.1: si ya estábamos abiertos y otra app lanza ACTION_VIEW/SEND,
+        // no creamos una nueva instancia (launchMode=singleTask): el
+        // sistema nos entrega el intent aquí. Lo procesamos igual que en
+        // onCreate para que el enlace compartido se cargue en una pestaña
+        // nueva (mantiene el historial de la pestaña actual).
+        setIntent(intent)
+        handleExternalIntent(intent)
     }
 
     private fun View.isVisible(): Boolean = visibility == View.VISIBLE
@@ -871,24 +1014,50 @@ class BrowserActivity : Activity() {
 
     // ---------------- navegacion ----------------
 
+    /**
+     * Resuelve lo tecleado en la barra de dirección y carga la URL.
+     *
+     * Si el texto no tiene esquema ni punto → búsqueda en el motor activo.
+     * Si tiene punto pero no esquema → se añade https://.
+     * Si ya tiene esquema → se usa literal. BUG 3: tras la navegación,
+     * ocultamos sugerencias y bajamos el teclado (las sugerencias no deben
+     * tapar la página que se va a cargar).
+     */
     private fun go(): Boolean {
-        var q = editUrl.text.toString().trim()
-        if (q.isEmpty()) return true
-        if (!q.contains("://") && !q.contains(".")) {
-            addToHistory(q)
-            load(Profiles.engineUrl(eng.sp, q))
-        } else if (!q.contains("://")) {
-            load("https://$q")
+        val query = editUrl.text.toString().trim()
+        if (query.isEmpty()) return true
+        if (!query.contains("://") && !query.contains(".")) {
+            addToHistory(query)
+            load(Profiles.engineUrl(eng.sp, query))
+        } else if (!query.contains("://")) {
+            load("https://$query")
         } else {
-            load(q)
+            load(query)
         }
+        hideSuggestions()
         hideKb()
         return true
     }
 
+    /**
+     * Carga la URL indicada en la pestaña activa.
+     *
+     * BUG 3 (informado por el usuario): "una vez realizada una búsqueda las
+     * sugerencias de búsquedas siguen saliendo y me ocultan la interfaz del
+     * navegador". Causa raíz: `load()` actualizaba el `editUrl` con la URL
+     * final (lo que disparaba el TextWatcher -> showSuggestions), pero
+     * nunca ocultaba el panel de sugerencias. Como `suppressSuggest`
+     * volvía a `false` antes de que el TextWorker corriera, el panel
+     * reaparecía tapando el WebView. Lo arreglamos ocultando el panel
+     * explícitamente aquí y en `onPageStarted/onPageFinished` (por si la
+     * carga se retrasa o cambia el URL por redirección).
+     */
     private fun load(url: String) {
         homeOverlay.visibility = View.GONE
         hideSheets()
+        // BUG 3: ocultar sugerencias ANTES de actualizar el texto del campo
+        // para que el TextWatcher no las vuelva a mostrar al reescribir la URL.
+        hideSuggestions()
         suppressSuggest = true
         editUrl.setText(url)
         suppressSuggest = false
@@ -900,6 +1069,9 @@ class BrowserActivity : Activity() {
         if (w.parent == null) attach(t)
         w.loadUrl(url)
         editUrl.setText(url)
+        // BUG 3: por si el setText anterior reactivó sugerencias, volvemos
+        // a ocultarlas (defensivo ante el orden de llamadas del TextWatcher).
+        hideSuggestions()
         renderStrip()
         persistTabs()
     }
@@ -1727,22 +1899,46 @@ class BrowserActivity : Activity() {
         eng.sp.edit().putString(panelKey(panel), arr.toString()).apply()
     }
 
+    /**
+     * Construye los paneles de accesos directos (Comunes / IA / Mis sitios)
+     * dentro del `HorizontalScrollView sitesPager`.
+     *
+     * BUG 2 (informado por el usuario): "no se puede hacer swipe de los
+     * accesos rápidos ni estos muestran las páginas". Causa raíz: cada
+     * panel se añadía a `sitesPages` (LinearLayout horizontal cuyo propio
+     * ancho es `wrap_content`) con `LayoutParams(MATCH_PARENT, …)`. La
+     * primera página medía todo el ancho del pager y desplazaba a las dos
+     * siguientes fuera de vista (ancho 0). El swipe quedaba "atascado"
+     * porque solo existía una página visible.
+     *
+     * Solución: cada panel se crea con un LayoutParams de ancho fijo igual
+     * al ancho del pager (en el primer render el pager aún no se ha
+     * medido, así que usamos el ancho de pantalla como fallback y
+     * repintamos en un `post {}`). Con esto las tres páginas se ven y se
+     * deslizan correctamente entre sí.
+     */
     private fun buildSitesPanels() {
         sitesPages.removeAllViews()
-        for (p in 0 until 3) {
+        // Ancho fijo de cada panel: si el pager ya se midió, usamos su
+        // ancho real; si no, el ancho de pantalla. Se repinta tras medir.
+        val panelWidth = sitesPager.width.takeIf { it > 0 }
+            ?: resources.displayMetrics.widthPixels
+        for (p in 0 until SITES_PANEL_COUNT) {
             val page = LinearLayout(this)
             page.orientation = LinearLayout.VERTICAL
+            // LayoutParams del panel dentro del LinearLayout horizontal:
+            // ancho fijo = ancho del pager (igual que el menú), alto = padre.
+            val pageLp = LinearLayout.LayoutParams(panelWidth, ViewGroup.LayoutParams.MATCH_PARENT)
+            page.layoutParams = pageLp
             val gv = GridView(this)
-            gv.numColumns = 4
+            gv.numColumns = SITES_COLUMNS
             gv.horizontalSpacing = dp(6)
             gv.verticalSpacing = dp(6)
             gv.setPadding(dp(8), dp(4), dp(8), dp(8))
             gv.adapter = sitesAdapter(p)
             page.addView(gv, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            // cada página ocupa el ancho visible del pager (swipe entre ellas)
-            sitesPages.addView(page, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            sitesPages.addView(page)
             gv.setOnItemClickListener { _, _, pos, _ -> openSite(p, pos) }
             gv.setOnItemLongClickListener { _, v, pos, _ ->
                 siteLongPress(p, pos, v); true
@@ -1751,6 +1947,11 @@ class BrowserActivity : Activity() {
         }
         renderSitesDots()
         updateSitesTitle()
+        // Si el pager aún no tenía ancho cuando se construyeron los
+        // paneles, repintamos una vez medido para fijar el ancho real.
+        if (sitesPager.width == 0) {
+            sitesPager.post { buildSitesPanels() }
+        }
     }
 
     private fun sitesAdapter(panel: Int): BaseAdapter {
@@ -1904,21 +2105,21 @@ class BrowserActivity : Activity() {
 
     private fun renderSitesDots() {
         sitesDots.removeAllViews()
-        for (i in 0 until 3) {
+        for (i in 0 until SITES_PANEL_COUNT) {
             val dot = TextView(this)
             dot.text = "•"
             dot.textSize = 17f
             dot.setPadding(dp(5), 0, dp(5), 0)
-            dot.setTextColor(if (i == sitesPage) 0xFFFF6D00.toInt() else 0xFFCCCCCC.toInt())
+            dot.setTextColor(if (i == sitesPage) COLOR_ORANGE else COLOR_DOT_OFF)
             dot.setOnClickListener { jumpSitesPage(i) }
             sitesDots.addView(dot)
         }
     }
 
     private fun jumpSitesPage(i: Int) {
+        sitesPage = i.coerceIn(0, SITES_PANEL_COUNT - 1)
         val w = sitesPager.width.coerceAtLeast(1)
-        sitesPager.smoothScrollTo(i * w, 0)
-        sitesPage = i.coerceIn(0, 2)
+        sitesPager.smoothScrollTo(sitesPage * w, 0)
         renderSitesDots()
         updateSitesTitle()
     }
@@ -1972,8 +2173,15 @@ class BrowserActivity : Activity() {
                 t.url = url
                 if (isActive) {
                     prog.visibility = View.VISIBLE
+                    // BUG 3: al actualizar el campo con la URL final (que
+                    // puede cambiar por redirección del servidor), el
+                    // TextWatcher reabría el panel de sugerencias. Lo
+                    // bloqueamos aquí y nos aseguramos de ocultarlo.
+                    suppressSuggest = true
                     editUrl.setText(url)
+                    suppressSuggest = false
                     homeOverlay.visibility = View.GONE
+                    hideSuggestions()
                 }
             }
             renderStrip()
@@ -2058,7 +2266,15 @@ class BrowserActivity : Activity() {
                 if (!t.priv) {
                     try { eng.db.addHistory(url, t.title, Users.active(this@BrowserActivity)) } catch (e: Exception) { }
                 }
-                if (isActive) editUrl.setText(url)
+                if (isActive) {
+                    // BUG 3: al terminar la carga, el campo se reescribe con
+                    // la URL final; ocultamos sugerencias para que no tapen
+                    // la página recién cargada.
+                    suppressSuggest = true
+                    editUrl.setText(url)
+                    suppressSuggest = false
+                    hideSuggestions()
+                }
             }
             // 4.0: credenciales — errores JS a consola + detección de formularios
             // + autorrelleno de lo guardado para este host
@@ -2700,43 +2916,77 @@ class BrowserActivity : Activity() {
         hideSheets()
         renderMenuPages()
         menuSheet.visibility = View.VISIBLE
+        // BUG 1: al abrir el menú la primera vez, `menuPager.width` todavía
+        // es 0 (no se ha medido), así que el GridLayout se construye con el
+        // ancho de fallback. Tras medir, repintamos y posicionamos el
+        // scroll en la página activa.
         menuPager.post {
-            val w = menuPager.width.coerceAtLeast(1)
-            menuPager.scrollTo(menuPage.coerceIn(0, 2) * w, 0)
+            if (menuPager.width > 0) {
+                renderMenuPages()
+                menuPager.scrollTo(menuPage.coerceIn(0, MENU_PAGE_COUNT - 1) * menuPager.width, 0)
+            }
         }
     }
 
+    /**
+     * Construye (y cachea en el container horizontal `menuPages`) una página
+     * GridLayout de 5 columnas × 2 filas. BUG 1: antes cada página se añadía
+     * a un LinearLayout horizontal con `MATCH_PARENT` en width, pero el
+     * LinearLayout tiene `wrap_content` en su propio ancho — el resultado
+     * es que la primera página medía el ancho del padre y las dos siguientes
+     * se "aplastaban" a 0; al deslizar, no se veían. Aquí forzamos que cada
+     * GridLayout mida exactamente el ancho de pantalla del paginador usando
+     * un LayoutParams de ancho fijo igual a `menuPager.width`. (En el primer
+     * render ese ancho puede ser 0; se corrige con un `post {}` que repinta
+     * cuando ya se ha medido.)
+     */
     private fun renderMenuPages() {
         menuPages.removeAllViews()
-        for (p in 0 until 3) {
+        // Ancho de cada página = ancho del paginador (0 la primera vez; el
+        // post() de showMenuSheet repinta tras medir).
+        val pageWidth = menuPager.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        for (p in 0 until MENU_PAGE_COUNT) {
             val page = android.widget.GridLayout(this)
-            page.columnCount = 5
-            page.rowCount = 2
+            page.columnCount = MENU_COLUMNS
+            page.rowCount = MENU_ROWS
             page.setPadding(dp(6), dp(4), dp(6), dp(4))
-            for (c in menuCells(p)) page.addView(menuCell(c))
-            menuPages.addView(page, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            // LayoutParams del GridLayout dentro del LinearLayout horizontal:
+            // ancho fijo = ancho del paginador, alto = MATCH_PARENT.
+            val gridLp = LinearLayout.LayoutParams(pageWidth, ViewGroup.LayoutParams.MATCH_PARENT)
+            page.layoutParams = gridLp
+            val cells = menuCells(p)
+            // Posiciona cada celda en su (col, row) para que el peso 1f del
+            // GridLayout reparta uniformemente el ancho y el alto.
+            for ((index, cell) in cells.withIndex()) {
+                val col = index % MENU_COLUMNS
+                val row = index / MENU_COLUMNS
+                page.addView(menuCell(cell, col, row))
+            }
+            menuPages.addView(page)
         }
         renderMenuDots()
     }
 
     private fun renderMenuDots() {
         menuDots.removeAllViews()
-        for (i in 0 until 3) {
+        for (i in 0 until MENU_PAGE_COUNT) {
             val dot = TextView(this)
             dot.text = "•"
             dot.textSize = 18f
             dot.setPadding(dp(6), 0, dp(6), 0)
-            dot.setTextColor(if (i == menuPage) 0xFFFF6D00.toInt() else 0xFFCCCCCC.toInt())
+            dot.setTextColor(if (i == menuPage) COLOR_ORANGE else COLOR_DOT_OFF)
             dot.setOnClickListener { jumpMenuPage(i) }
             menuDots.addView(dot)
         }
     }
 
     private fun jumpMenuPage(i: Int) {
+        menuPage = i.coerceIn(0, MENU_PAGE_COUNT - 1)
         val w = menuPager.width.coerceAtLeast(1)
-        menuPager.smoothScrollTo(i.coerceIn(0, 2) * w, 0)
-        menuPage = i.coerceIn(0, 2)
+        menuPager.smoothScrollTo(menuPage * w, 0)
+        // BUG 1: antes no se repintaban los puntos al saltar; el indicador
+        // se quedaba en la página anterior hasta que el usuario soltaba el
+        // gesto. Repintamos en cuanto cambia el estado.
         renderMenuDots()
     }
 
@@ -2792,31 +3042,60 @@ class BrowserActivity : Activity() {
         }
     }
 
-    private fun menuCell(c: MenuCell): View {
+    /**
+     * Construye una celda del menú inferior (icono + etiqueta).
+     *
+     * BUG 1 (informado por el usuario): "el menú del navegador no se muestra
+     * correctamente, no salen todos los botones ni se puede cambiar entre
+     * submenús". Causa raíz: la celda se añadía al GridLayout con
+     * LayoutParams WRAP_CONTENT y el `columnSpec` con peso 1f se fijaba
+     * DESPUÉS de addView, por lo que el GridLayout no lo aplicaba y las
+     * celdas se amontonaban a la izquierda. La segunda fila (filas 6..10)
+     * quedaba recortada porque el `rowCount=2` no reservaba espacio
+     * suficiente. Además el contenedor `menuPages` era un LinearLayout
+     * horizontal con cada página a `MATCH_PARENT` — pero al medirse, la
+     * primera página se "comía" el ancho y la segunda y tercera no se
+     * mostraban al deslizar.
+     *
+     * Solución: el GridLayout se configura con `columnCount=5` y se fija
+     * explícitamente el LayoutParams a la celda ANTES de añadirla, con
+     * `columnSpec = spec(col, 1f)` y `width = 0` para que el peso reparta
+     * el ancho entre las 5 columnas a partes iguales; el alto se da con
+     * `rowSpec = spec(row, 1f)` y `height = 0` para que las 2 filas se
+     * repartan el alto del contenedor uniformemente. Cada página del
+     * menú se mide al ancho de pantalla (`MeasureSpec` del padre), no al
+     * del LinearLayout horizontal.
+     */
+    private fun menuCell(c: MenuCell, col: Int, row: Int): View {
         val cell = LinearLayout(this)
         cell.orientation = LinearLayout.VERTICAL
         cell.gravity = Gravity.CENTER
         cell.setPadding(dp(4), dp(10), dp(4), dp(10))
         cell.background = getDrawable(android.R.drawable.list_selector_background)
-        val ic = TextView(this)
-        ic.text = c.icon
-        ic.textSize = 22f
-        ic.gravity = Gravity.CENTER
-        ic.setTextColor(if (c.active) 0xFF1565C0.toInt() else 0xFF212121.toInt())
-        cell.addView(ic)
-        val lb = TextView(this)
-        lb.text = c.label
-        lb.textSize = 11f
-        lb.gravity = Gravity.CENTER
-        lb.maxLines = 2
-        lb.setPadding(dp(2), dp(4), dp(2), 0)
-        lb.setTextColor(if (c.active) 0xFF1565C0.toInt() else 0xFF3A3A3A.toInt())
-        cell.addView(lb)
+        // Icono emoji de la celda.
+        val iconView = TextView(this)
+        iconView.text = c.icon
+        iconView.textSize = 22f
+        iconView.gravity = Gravity.CENTER
+        iconView.setTextColor(if (c.active) COLOR_ACCENT else COLOR_TEXT_PRIMARY)
+        cell.addView(iconView)
+        // Etiqueta bajo el icono (hasta 2 líneas para no recortar "Añadir marcador").
+        val labelView = TextView(this)
+        labelView.text = c.label
+        labelView.textSize = 11f
+        labelView.gravity = Gravity.CENTER
+        labelView.maxLines = 2
+        labelView.setPadding(dp(2), dp(4), dp(2), 0)
+        labelView.setTextColor(if (c.active) COLOR_ACCENT else COLOR_TEXT_SECONDARY)
+        cell.addView(labelView)
+        // LayoutParams: peso 1f en X e Y, ancho/alto 0 para que el GridLayout
+        // reparta el espacio. Se asignan ANTES de addView para que tengan
+        // efecto (GridLayout lee los LayoutParams al medir, no al layout).
         val lp = android.widget.GridLayout.LayoutParams()
         lp.width = 0
-        lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
-        lp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
-        lp.rowSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+        lp.height = 0
+        lp.columnSpec = android.widget.GridLayout.spec(col, 1f)
+        lp.rowSpec = android.widget.GridLayout.spec(row, 1f)
         cell.layoutParams = lp
         cell.setOnClickListener { c.action() }
         return cell
@@ -2840,6 +3119,78 @@ class BrowserActivity : Activity() {
         } catch (e: Exception) {
             toast("No se pudo compartir")
         }
+    }
+
+    /**
+     * Menú contextual de la barra de dirección (BUG 4): pulsación larga
+     * sobre el campo URL. Mantiene la posibilidad de compartir y copiar la
+     * URL actual aunque el toque simple haya borrado el texto para escribir
+     * una nueva. Las acciones son:
+     *   · Compartir enlace  → ACTION_SEND con la URL de la pestaña activa.
+     *   · Copiar URL        → copia al portapapeles (ClipData).
+     *   · Pegar y abrir      → si hay una URL en el portapapeles, la pega
+     *                          en el campo y la carga.
+     *   · Editar URL        → pone el cursor al final sin seleccionar todo,
+     *                          para corregir un carácter sin borrar el resto.
+     */
+    private fun showUrlContextMenu() {
+        val currentUrl = tabs.getOrNull(cur)?.url ?: ""
+        if (!currentUrl.startsWith("http")) {
+            toast("Abre una página primero para copiarla o compartirla")
+            return
+        }
+        val options = arrayOf(
+            "🔗 Compartir enlace",
+            "📋 Copiar URL",
+            "📂 Pegar y abrir",
+            "✏ Editar URL (sin borrar)")
+        AlertDialog.Builder(this)
+            .setTitle(MediaProbe.hostOf(currentUrl))
+            .setItems(options) { _, which ->
+                when (which) {
+                    // Compartir enlace: usa el chooser del sistema.
+                    0 -> sharePage()
+                    // Copiar URL: pega en el portapapeles del sistema.
+                    1 -> {
+                        try {
+                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            clipboard.setPrimaryClip(
+                                android.content.ClipData.newPlainText("url", currentUrl))
+                            toast("URL copiada")
+                        } catch (e: Exception) {
+                            toast("No se pudo copiar: ${e.message}")
+                        }
+                    }
+                    // Pegar y abrir: lee la URL del portapapeles y la carga.
+                    2 -> {
+                        try {
+                            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            val clip = clipboard.primaryClip
+                            val text = clip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()
+                                ?: ""
+                            if (text.isNotEmpty() && (text.startsWith("http") ||
+                                        text.contains("://") || text.contains("."))) {
+                                load(if (text.contains("://")) text else "https://$text")
+                            } else {
+                                toast("El portapapeles no tiene una URL")
+                            }
+                        } catch (e: Exception) {
+                            toast("No se pudo leer el portapapeles")
+                        }
+                    }
+                    // Editar URL: sitúa el cursor al final sin seleccionar
+                    // todo, para corregir un carácter concreto.
+                    3 -> {
+                        editUrl.requestFocus()
+                        editUrl.setSelection(editUrl.text.length)
+                        showKb()
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     /** Buscar texto dentro de la página (resaltado nativo del WebView). */
@@ -2877,12 +3228,28 @@ class BrowserActivity : Activity() {
 
     private class Sugg(val icon: String, val title: String, val url: String)
 
-    /** Panel de sugerencias bajo la barra superior (4.0 U10): LISTA
-     *  DESPLAZABLE hasta el último resultado — URL directa, marcadores,
-     *  historial de páginas y búsquedas previas, filtrados por lo tecleado.
-     *  Altura con tope (420dp) y scroll interno; nunca más sin scroll. */
+    /**
+     * Panel de sugerencias bajo la barra superior (4.0 U10): LISTA
+     * DESPLAZABLE hasta el último resultado — URL directa, marcadores,
+     * historial de páginas y búsquedas previas, filtrados por lo tecleado.
+     * Altura con tope (420dp) y scroll interno; nunca más sin scroll.
+     *
+     * BUG 3 (informado por el usuario): tras una búsqueda, el campo se
+     * reescribía con la URL de destino y el TextWatcher reabría este
+     * panel, que tapaba el WebView. Aquí además filtramos el caso en el
+     * que el texto actual coincide EXACTAMENTE con la URL de la pestaña
+     * activa (carga en curso o ya cargada): en ese caso no hay nada que
+     * sugerir, porque el usuario ya está ahí.
+     */
     private fun showSuggestions(q: String) {
         if (suppressSuggest || q.isBlank()) { hideSuggestions(); return }
+        // BUG 3: si el campo coincide con la URL activa, no mostramos
+        // sugerencias (ya se está cargando o ya se cargó esa página).
+        val activeTabUrl = tabs.getOrNull(cur)?.url ?: ""
+        if (activeTabUrl.isNotEmpty() && q.trim() == activeTabUrl) {
+            hideSuggestions()
+            return
+        }
         val low = q.lowercase(Locale.US)
         val rows = ArrayList<Sugg>()
         val uq = q.trim()

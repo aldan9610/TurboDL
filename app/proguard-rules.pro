@@ -48,3 +48,28 @@
 # --- jsoup (exportacion Markdown, vendido en app/libs) ---
 -keep class org.jsoup.** { *; }
 -dontwarn org.jsoup.**
+
+# --- libadblockplus-android (Adblock Plus oficial, 4.1) ---
+# La libreria expone objetos Java al codigo nativo (libadblockplus + V8) por
+# nombre de metodo JNI. R8 no debe renombrar ni eliminar ni una sola clase
+# del paquete raiz org.adblockplus.libadblockplus: un NoSuchMethodError en
+# runtime significaria que la pagina se queda en blanco al cargar. Las
+# reglas provistas por la propia AAR (consumer-rules) ya cubren esto, pero
+# se reafirman aqui por si la AAR no se resolvio (modo fallback) y alguien
+# la construye manualmente desde el codigo fuente.
+-keep class org.adblockplus.libadblockplus.** { *; }
+-keep class org.adblockplus.libadblockplus.android.** { *; }
+-keep class org.adblockplus.libadblockplus.android.webview.** { *; }
+-keep class org.adblockplus.libadblockplus.android.settings.** { *; }
+# Mantener metodos nativos de cualquier clase (JNI de V8 + libadblockplus).
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+# Mantener miembros publicos de AdblockHelper (entry point singleton).
+-keepclassmembers class org.adblockplus.libadblockplus.android.AdblockHelper {
+    public *;
+}
+-dontwarn org.adblockplus.**
+# Timber: la AAR la usa para logging; se incluye via dependencia transitiva.
+-keep class timber.log.** { *; }
+-dontwarn timber.log.**
