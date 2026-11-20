@@ -23,6 +23,7 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.PopupMenu
 import android.widget.ProgressBar
@@ -91,6 +92,10 @@ class MainActivity : Activity() {
         if (!eng.sp.getBoolean("onboardingDone", false)) {
             startActivity(Intent(this, OnboardingActivity::class.java))
         }
+
+        // actualización automática (GitHub Releases): como mucho una consulta
+        // al día; solo avisa si hay versión nueva
+        com.turbodl.util.Updater.checkSilent(this, eng)
 
         // URL compartida desde otra app
         if (intent?.action == Intent.ACTION_SEND) {
@@ -489,16 +494,186 @@ class MainActivity : Activity() {
                         Toast.makeText(this, "Cabeceras ignoradas: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
-                eng.add(url, editName.text.toString().trim(), kindUser, spinCat.selectedItemPosition,
-                    seek.progress + 1, headersJson, chkQueue.isChecked, null) { t ->
+                val cat = spinCat.selectedItemPosition
+                val conns = seek.progress + 1
+                val enqueue = chkQueue.isChecked
+                val rawName = editName.text.toString().trim()
+
+                // varios enlaces pegados a la vez (uno por línea): alta en lote
+                val links = url.lines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("http") || it.startsWith("magnet") || it.startsWith("ftp") }
+                if (links.size > 1) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Varios enlaces detectados")
+                        .setMessage("Se añadirán ${links.size} descargas" +
+                                (if (enqueue) " a la cola." else " y empezarán enseguida.") +
+                                "\n\n" + links.take(5).joinToString("\n") { "• ${it.take(60)}" } +
+                                (if (links.size > 5) "\n… y ${links.size - 5} más" else ""))
+                        .setPositiveButton("Añadir todo") { _, _ ->
+                            links.forEach { link ->
+                                eng.add(link, "", kindUser, cat, conns, headersJson, enqueue, null) { t ->
+                                    if (t != null) toast("Añadido: ${t.name}")
+                                }
+                            }
+                            maybeStartService()
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                    return@setPositiveButton
+                }
+
+                // torrent con selección de archivos (magnet o .torrent)
+                val esTorrent = kindUser == 5 || url.startsWith("magnet:", true) ||
+                        url.substringBefore('?').endsWith(".torrent", true)
+                if (esTorrent && eng.sp.getBoolean("torrentSel", true)) {
+                    torrentAddFlow(url, rawName, cat, headersJson, enqueue)
+                    return@setPositiveButton
+                }
+
+                eng.add(url, rawName, kindUser, cat, conns, headersJson, enqueue, null) { t ->
                     if (t != null) {
-                        toast(if (chkQueue.isChecked)
+                        toast(if (enqueue)
                             "Añadido a la cola: ${t.name}" else "Descargando: ${t.name}")
                         maybeStartService()
                     }
                 }
             }
             .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ---------------- torrents: elegir archivos antes de descargar ----------------
+
+    /**
+     * Alta de torrent con sonda de metadatos: espera a que llegue la lista
+     * de archivos (hasta 45 s buscando peers) y, si hay varios, abre el
+     * diálogo de selección. Si no llega la lista, cae al alta normal.
+     */
+    private fun torrentAddFlow(url: String, name: String, cat: Int,
+                               headersJson: String, enqueue: Boolean) {
+        val saveDir = File(eng.catDir(cat), "Torrent_" + System.currentTimeMillis())
+        val cancel = arrayOf(false)
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Torrent")
+            .setMessage("Consultando la lista de archivos del torrent…\n" +
+                    "(puede tardar hasta 45 s buscando peers)")
+            .setNegativeButton("Cancelar") { _, _ -> cancel[0] = true }
+            .create()
+        dlg.show()
+        Thread {
+            val dl = com.turbodl.engine.TorrentDownloader(Task(), eng)
+            val meta = dl.probeMetadata(eng, url, saveDir, 45) { cancel[0] }
+            runOnUiThread {
+                dlg.dismiss()
+                if (meta == null) {
+                    if (cancel[0]) {
+                        // cancelado a mitad: no dejar el handle vivo en la sesión
+                        dl.removeProbe(eng, com.turbodl.engine.TorrentDownloader.magnetHash(url) ?: "")
+                        toast("Añadir torrent cancelado")
+                    } else {
+                        eng.add(url, name, 5, cat, 1, headersJson, enqueue, null) { t ->
+                            if (t != null) {
+                                toast(if (enqueue) "En cola: ${t.name}" else "Descargando: ${t.name}")
+                                maybeStartService()
+                            }
+                        }
+                    }
+                    return@runOnUiThread
+                }
+                if (meta.files.size <= 1) {
+                    val extra = JSONObject().put("tdir", saveDir.absolutePath).put("ih", meta.hash)
+                    eng.add(url, name.ifEmpty { meta.name }, 5, cat, 1, headersJson, enqueue,
+                        extra.toString()) { t ->
+                        if (t != null) {
+                            toast(if (enqueue) "En cola: ${t.name}" else "Descargando: ${t.name}")
+                            maybeStartService()
+                        }
+                    }
+                    return@runOnUiThread
+                }
+                showTorrentFileDialog(url, name, meta, saveDir, cat, headersJson, enqueue)
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** Diálogo con la lista de archivos del torrent: casillas por archivo,
+     *  Todo/Nada y opción de descarga secuencial (ver mientras baja). */
+    private fun showTorrentFileDialog(url: String, userName: String,
+                                      meta: com.turbodl.engine.TorrentDownloader.Meta,
+                                      saveDir: File, cat: Int, headersJson: String,
+                                      enqueue: Boolean) {
+        val checked = BooleanArray(meta.files.size) { true }
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val info = TextView(this)
+        info.text = "${meta.name.take(60)}\n${meta.files.size} archivos · ${Kit.fmtBytes(meta.total)}"
+        info.textSize = 13f
+        info.setPadding(50, 20, 50, 8)
+        lay.addView(info)
+        val lv = ListView(this)
+        lv.choiceMode = ListView.CHOICE_MODE_MULTIPLE
+        val ad = object : BaseAdapter() {
+            override fun getCount() = meta.files.size
+            override fun getItem(p: Int) = meta.files[p]
+            override fun getItemId(p: Int) = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val v = (cv as? android.widget.CheckedTextView)
+                    ?: layoutInflater.inflate(
+                        android.R.layout.simple_list_item_multiple_choice, parent, false)
+                        as android.widget.CheckedTextView
+                v.text = "${meta.files[p].path.take(60)}\n${Kit.fmtBytes(meta.files[p].size)}"
+                v.setSingleLine(false)
+                v.setPadding(60, 24, 40, 24)
+                v.isChecked = checked[p]
+                return v
+            }
+        }
+        lv.adapter = ad
+        lv.setOnItemClickListener { _, _, p, _ ->
+            checked[p] = !checked[p]
+            ad.notifyDataSetChanged()
+        }
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 520))
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val btnTodo = Button(this); btnTodo.text = "Todo"
+        val btnNada = Button(this); btnNada.text = "Nada"
+        btnTodo.setOnClickListener { for (i in checked.indices) checked[i] = true; ad.notifyDataSetChanged() }
+        btnNada.setOnClickListener { for (i in checked.indices) checked[i] = false; ad.notifyDataSetChanged() }
+        row.addView(btnTodo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(btnNada, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        lay.addView(row)
+        val chkSeq = CheckBox(this)
+        chkSeq.text = "▶ Ver mientras descarga (secuencial)"
+        chkSeq.setPadding(50, 10, 50, 10)
+        lay.addView(chkSeq)
+
+        AlertDialog.Builder(this)
+            .setTitle("Elegir archivos del torrent")
+            .setView(lay)
+            .setPositiveButton("⬇ Descargar") { _, _ ->
+                val skip = meta.files.indices.filter { !checked[it] }.joinToString(",")
+                val extra = JSONObject()
+                    .put("tdir", saveDir.absolutePath)
+                    .put("ih", meta.hash)
+                    .put("seq", chkSeq.isChecked)
+                if (skip.isNotEmpty()) extra.put("skip", skip)
+                eng.add(url, userName.ifEmpty { meta.name }, 5, cat, 1, headersJson,
+                    enqueue, extra.toString()) { t ->
+                    if (t != null) {
+                        val nSel = checked.count { it }
+                        toast("Torrent: $nSel de ${meta.files.size} archivos" +
+                                (if (chkSeq.isChecked) " · secuencial" else ""))
+                        maybeStartService()
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar") { _, _ ->
+                val dl = com.turbodl.engine.TorrentDownloader(Task(), eng)
+                dl.removeProbe(eng, com.turbodl.engine.TorrentDownloader.magnetHash(url) ?: meta.hash)
+            }
             .show()
     }
 

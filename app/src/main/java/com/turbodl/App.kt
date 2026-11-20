@@ -9,6 +9,9 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         app = this
+        // registro local de fallos (sin telemetría): lo primero, para no
+        // perder ni el crash que ocurra durante el arranque
+        com.turbodl.util.CrashLog.install(this)
         engine = Engine(this)
         engine.init()
         // bloqueador de anuncios: inicializar temprano (hilo de fondo) SOLO con el

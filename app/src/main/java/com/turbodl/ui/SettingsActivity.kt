@@ -64,12 +64,25 @@ class SettingsActivity : Activity() {
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
         row("🛡 Bloqueador de anuncios",
             if (eng.sp.getBoolean("adblock", true)) "activado" else "desactivado") { toggleAdblock() }
+        row("🚫 Exclusiones del bloqueador", exentoText()) { exentoManage() }
         row("🔄 Actualizar listas de filtros (EasyList + EasyPrivacy)", adblockText()) { updateFilterLists() }
         row("🖥 Modo escritorio por defecto",
             if (eng.sp.getBoolean("deskDefault", false)) "activado" else "desactivado") { toggleDesk() }
         row("🧹 Limpiar historial de búsqueda", "") { clearHistory() }
         row("🕘 Limpiar historial de páginas", "") { clearPageHistory() }
         row("🍪 Limpiar cookies y caché del navegador", "") { clearWeb() }
+
+        header("Torrents")
+        row("🧩 Elegir archivos del torrent",
+            if (eng.sp.getBoolean("torrentSel", true))
+                "muestra la lista de archivos al añadir un magnet"
+            else "descarga todo el contenido sin preguntar") { toggleTorrentSel() }
+
+        header("Mantenimiento")
+        row("💾 Exportar descargas (respaldo JSON)", exportText()) { exportTasks() }
+        row("📥 Restaurar descargas desde respaldo", "") { importTasks() }
+        row("🐞 Compartir registro de fallos", crashText()) { shareCrashLog() }
+        row("⬆ Buscar actualizaciones", updateText()) { checkUpdate() }
 
         header("Apariencia")
         row("🔠 Tamaño de fuente", "${eng.sp.getInt("fontScale", 100)}%") { pickFontScale() }
@@ -90,11 +103,16 @@ class SettingsActivity : Activity() {
 
         header("Acerca de")
         val about = TextView(this)
-        about.text = "TurboDL 3.4.0 · gestor de descargas multipropósito\n" +
+        val vName = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (e: Exception) { "?" }
+        about.text = "TurboDL $vName · gestor de descargas multipropósito\n" +
                 "HTTP multihilo · FTP · HLS · DASH · BitTorrent · subtítulos · " +
-                "reproductor interno · navegador con pestañas, marcadores y bloqueador de anuncios\n" +
+                "reproductor interno (ExoPlayer) · navegador con pestañas, marcadores " +
+                "y bloqueador de anuncios\n" +
                 "Requiere Android 8.0 (API 26). Pensado para equipos de " +
-                "1 GB de RAM: sin AndroidX, pool de hilos acotado y WebView único.\n" +
+                "1 GB de RAM: sin AndroidX de interfaz, pool de hilos acotado y " +
+                "recorte de pestañas bajo presión de memoria.\n" +
                 "Gratis, sin anuncios ni suscripciones."
         about.textSize = 12f
         about.setPadding(50, 8, 50, 8)
@@ -210,6 +228,36 @@ class SettingsActivity : Activity() {
                 .putString("dlMode", "saf").apply()
             buildUi()
             toast("Descargas en: " + SafStore.treeName(this, uri) + "/TurboDL")
+        } else if (requestCode == 61 && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            Thread {
+                try {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(buildBackup().toByteArray(Charsets.UTF_8))
+                    } ?: throw Exception("no se pudo crear el archivo")
+                    runOnUiThread { toast("Respaldo exportado") }
+                } catch (e: Exception) {
+                    runOnUiThread { toast("No se pudo exportar: ${e.message}") }
+                }
+            }.apply { isDaemon = true }.start()
+        } else if (requestCode == 62 && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            Thread {
+                try {
+                    val text = contentResolver.openInputStream(uri)?.use {
+                        it.readBytes().toString(Charsets.UTF_8)
+                    } ?: throw Exception("no se pudo leer el archivo")
+                    val n = importBackup(text)
+                    runOnUiThread {
+                        if (n > 0) {
+                            toast("Restauradas $n tarea(s): revisa la lista")
+                            buildUi()
+                        } else toast("El respaldo no contiene tareas")
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread { toast("No se pudo restaurar: ${e.message}") }
+                }
+            }.apply { isDaemon = true }.start()
         }
     }
 
@@ -433,6 +481,207 @@ class SettingsActivity : Activity() {
         val nv = !eng.sp.getBoolean("autoResume", false)
         eng.sp.edit().putBoolean("autoResume", nv).apply()
         buildUi()
+    }
+
+    // ---------------- exclusión, torrents, respaldo, fallos, updates ----------------
+
+    private fun exentoText(): String {
+        val n = try { com.turbodl.engine.AdBlockEngine.exemptCount() } catch (e: Exception) { 0 }
+        return if (n == 0) "ningún sitio excluido"
+        else "$n sitio(s) con el bloqueo desactivado"
+    }
+
+    private fun exentoManage() {
+        val raw = eng.sp.getString("adblockExempt", "[]") ?: "[]"
+        val arr = try { org.json.JSONArray(raw) } catch (e: Exception) { org.json.JSONArray() }
+        if (arr.length() == 0) {
+            toast("El bloqueo se desactiva por sitio desde el escudo 🛡 del navegador")
+            return
+        }
+        val items = ArrayList<String>()
+        for (i in 0 until arr.length()) items.add(arr.optString(i))
+        AlertDialog.Builder(this)
+            .setTitle("Sitios con el bloqueo desactivado")
+            .setItems(items.toTypedArray()) { _, which ->
+                val dom = items[which]
+                AlertDialog.Builder(this)
+                    .setTitle("Reactivar bloqueo")
+                    .setMessage("¿Volver a bloquear anuncios en «$dom»?")
+                    .setPositiveButton("Reactivar") { _, _ ->
+                        try {
+                            com.turbodl.engine.AdBlockEngine.setExempt(this,
+                                "https://$dom/", false)
+                        } catch (e: Exception) { }
+                        buildUi()
+                        toast("Bloqueo reactivado en $dom")
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+            .setNeutralButton("Vaciar todo") { _, _ ->
+                for (i in 0 until arr.length()) {
+                    try {
+                        com.turbodl.engine.AdBlockEngine.setExempt(this,
+                            "https://${arr.optString(i)}/", false)
+                    } catch (e: Exception) { }
+                }
+                buildUi()
+                toast("Exclusiones vaciadas: el bloqueo vuelve a todos los sitios")
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    private fun toggleTorrentSel() {
+        val nv = !eng.sp.getBoolean("torrentSel", true)
+        eng.sp.edit().putBoolean("torrentSel", nv).apply()
+        buildUi()
+        toast(if (nv) "Al añadir un magnet se mostrarán sus archivos"
+        else "Los torrents se descargan completos sin preguntar")
+    }
+
+    private fun exportText(): String {
+        val n = eng.tasks.size
+        return "$n tarea(s) · categorías y ajustes incluidos"
+    }
+
+    private fun crashText(): String {
+        val f = com.turbodl.util.CrashLog.logFile(this)
+        return if (f.exists() && f.length() > 0)
+            "${Kit.fmtBytes(f.length())} registrados" else "sin fallos registrados"
+    }
+
+    private fun updateText(): String =
+        "instalada: ${com.turbodl.util.Updater.installedVersion(this)}"
+
+    private fun checkUpdate() {
+        toast("Consultando GitHub…")
+        com.turbodl.util.Updater.check(this, eng, manual = true)
+    }
+
+    private fun shareCrashLog() {
+        val f = com.turbodl.util.CrashLog.logFile(this)
+        if (!f.exists() || f.length() == 0L) {
+            toast("No hay fallos registrados. ¡Buena señal!")
+            return
+        }
+        try {
+            val uri = android.net.Uri.parse(
+                "content://com.turbodl.files/logs/${android.net.Uri.encode(f.name)}")
+            val i = Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_SUBJECT, "Registro de fallos de TurboDL")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(i, "Compartir registro"))
+        } catch (e: Exception) {
+            toast("No se pudo compartir: ${e.message}")
+        }
+    }
+
+    /** Respaldo: tareas + ajustes clave en un JSON. */
+    private fun exportTasks() {
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("application/json")
+            .putExtra(Intent.EXTRA_TITLE, "turbodl-respaldo.json")
+        startActivityForResult(i, 61)
+    }
+
+    private fun importTasks() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+        startActivityForResult(i, 62)
+    }
+
+    private fun buildBackup(): String {
+        val o = org.json.JSONObject()
+        o.put("app", "TurboDL")
+        o.put("ver", 1)
+        o.put("exported", System.currentTimeMillis())
+        o.put("appVersion", try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (e: Exception) { "?" })
+        val arr = org.json.JSONArray()
+        for (t in eng.tasks.values) {
+            val t2 = org.json.JSONObject()
+            t2.put("url", t.url)
+            t2.put("kind", t.kind)
+            t2.put("name", t.name)
+            t2.put("dir", t.dir)
+            t2.put("file", t.fileName)
+            t2.put("total", t.total)
+            t2.put("done", t.done)
+            t2.put("state", t.state)
+            t2.put("error", t.error)
+            t2.put("headers", t.headersJson)
+            t2.put("segs", t.segsJson)
+            t2.put("extra", t.extraJson)
+            t2.put("time", t.time)
+            arr.put(t2)
+        }
+        o.put("tasks", arr)
+        return o.toString(2)
+    }
+
+    /** Importa respaldos: las tareas activas llegan en cola y los destinos
+     *  locales se re-apuntan a la carpeta actual de la categoría. */
+    private fun importBackup(text: String): Int {
+        val o = org.json.JSONObject(text)
+        if (o.optString("app") != "TurboDL") throw Exception("no es un respaldo de TurboDL")
+        val arr = o.optJSONArray("tasks") ?: return 0
+        var n = 0
+        for (i in 0 until arr.length()) {
+            val j = arr.optJSONObject(i) ?: continue
+            val t = com.turbodl.model.Task()
+            t.url = j.optString("url", "")
+            if (t.url.isEmpty()) continue
+            t.kind = j.optInt("kind", 0)
+            t.name = j.optString("name", "tarea")
+            t.fileName = j.optString("file", "")
+            t.total = j.optLong("total", -1L)
+            t.done = j.optLong("done", 0L)
+            t.error = j.optString("error", "")
+            t.headersJson = j.optString("headers", "")
+            t.segsJson = j.optString("segs", "")
+            t.extraJson = j.optString("extra", "")
+            t.time = if (j.has("time")) j.optLong("time") else System.currentTimeMillis()
+            // estado: solo conservan sentido Pausado/Done/En cola
+            val st = j.optInt("state", 0)
+            t.state = when (st) {
+                com.turbodl.model.St.DONE -> com.turbodl.model.St.DONE
+                com.turbodl.model.St.PAUSED -> com.turbodl.model.St.PAUSED
+                else -> com.turbodl.model.St.QUEUED
+            }
+            // destino: si la carpeta original no existe, usar la categoría actual
+            val ex = t.extra()
+            val catIdx = ex.optInt("cat", 0).coerceIn(0, eng.cats.size - 1)
+            val isSaf = ex.optString("tree", "").isNotEmpty()
+            if (!isSaf && t.dir.isNotEmpty() && !java.io.File(t.dir).exists()) {
+                t.dir = eng.catDir(catIdx).absolutePath
+                if (t.fileName.isNotEmpty()) {
+                    t.fileName = com.turbodl.util.Kit.uniqueName(t.dir, t.fileName)
+                }
+                t.done = 0
+                t.segsJson = ""
+                if (t.state == com.turbodl.model.St.DONE) {
+                    t.state = com.turbodl.model.St.PAUSED
+                    t.putExtra("note", "restaurado: el archivo original no está; revisa y reanuda")
+                }
+            } else if (isSaf) {
+                t.done = 0
+                t.segsJson = ""
+                if (t.state == com.turbodl.model.St.DONE) {
+                    t.state = com.turbodl.model.St.PAUSED
+                    t.putExtra("note", "restaurado: comprueba si el archivo sigue en el árbol SAF")
+                }
+            }
+            eng.db.insert(t)
+            synchronized(eng.tasks) { eng.tasks[t.id] = t }
+            n++
+        }
+        return n
     }
 
     private fun toggleAdblock() {

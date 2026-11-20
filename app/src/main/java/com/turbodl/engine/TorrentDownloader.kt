@@ -75,6 +75,107 @@ class TorrentDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
         } catch (e: Exception) { }
     }
 
+    // ---------------- metadatos previos (selección de archivos) ----------------
+
+    /** Archivo dentro del torrent (ruta relativa y tamaño). */
+    class TFile(val path: String, val size: Long)
+
+    /** Metadatos leidos de un magnet/.torrent sin empezar a descargar. */
+    class Meta(val hash: String, val name: String, val total: Long, val files: List<TFile>)
+
+    /**
+     * Lee la lista de archivos de un torrent ANTES de añadir la tarea:
+     *  - .torrent (http/content/archivo local): se parsea localmente, sin sesión.
+     *  - magnet: se añade a la sesión, se espera la metadata (DHT/peers) y se
+     *    pausa el handle para que no descargue mientras el usuario elige.
+     * Devuelve null si no se pudo (timeout sin peers, cancelado...). El handle
+     * queda PAUSADO en la sesión; la tarea que usa "ih"+"tdir" lo reutiliza y
+     * si el usuario cancela el diálogo hay que llamar a removeProbe.
+     */
+    fun probeMetadata(engine: Engine, url: String, saveDir: File,
+                      timeoutSec: Int = 45, cancelled: () -> Boolean = { false }): Meta? {
+        val sm = engine.session()
+        try {
+            var hash: Sha1Hash? = null
+            var ti: TorrentInfo? = null
+            if (url.startsWith("magnet:", true)) {
+                val hex = magnetHash(url) ?: return null
+                hash = Sha1Hash(hex)
+                if (sm.find(hash) == null) sm.download(url, saveDir)
+                val dl = System.currentTimeMillis() + timeoutSec * 1000L
+                while (System.currentTimeMillis() < dl) {
+                    if (cancelled()) return null
+                    val th = sm.find(hash)
+                    if (th != null && th.isValid && th.status().hasMetadata()) {
+                        try { th.pause() } catch (e: Exception) { }
+                        ti = th.torrentFile()
+                        break
+                    }
+                    Thread.sleep(1000)
+                }
+                if (ti == null) return null
+            } else {
+                val f = obtainTorrentFileStatic(engine, url)
+                ti = TorrentInfo(f)
+                if (!ti.isValid) return null
+            }
+            val t = ti!!
+            val fs = t.files()
+            val files = ArrayList<TFile>(fs.numFiles())
+            for (i in 0 until fs.numFiles()) {
+                files.add(TFile(fs.filePath(i), fs.fileSize(i)))
+            }
+            val h = hash ?: t.infoHash()
+            return Meta(h.toHex(), t.name(), t.totalSize(), files)
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    /** Quita de la sesión el handle pausado que dejó probeMetadata. */
+    fun removeProbe(engine: Engine, hashHex: String) {
+        try {
+            val sm = engine.session()
+            val th = sm.find(Sha1Hash(hashHex))
+            if (th != null && th.isValid) sm.remove(th)
+        } catch (e: Exception) { }
+    }
+
+    /** Versión estática de obtainTorrentFile para la sonda (sin tarea). */
+    private fun obtainTorrentFileStatic(engine: Engine, u: String): File {
+        if (u.startsWith("content://") || u.startsWith("file://")) {
+            val src = android.net.Uri.parse(u)
+            val dst = File(engine.ctx.cacheDir, "torrent_" + System.currentTimeMillis() + ".torrent")
+            val inp = engine.ctx.contentResolver.openInputStream(src)
+                ?: throw DlException("no se pudo abrir $u")
+            val out = java.io.FileOutputStream(dst)
+            val buf = ByteArray(32 * 1024)
+            while (true) {
+                val n = inp.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+            inp.close(); out.close()
+            return dst
+        }
+        if (u.startsWith("http://") || u.startsWith("https://")) {
+            val dst = File(engine.ctx.cacheDir, "torrent_" + System.currentTimeMillis() + ".torrent")
+            val conn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.setRequestProperty("User-Agent", EngineHolder.ua)
+            if (conn.responseCode !in 200..299) throw DlException("HTTP ${conn.responseCode}")
+            val out = java.io.FileOutputStream(dst)
+            conn.inputStream.use { inp -> inp.copyTo(out) }
+            out.close()
+            conn.disconnect()
+            return dst
+        }
+        val f = File(u)
+        if (f.exists()) return f
+        throw DlException("origen de .torrent no soportado: $u")
+    }
+
     override fun run() {
         var ti: TorrentInfo? = null
         try {
@@ -104,6 +205,9 @@ class TorrentDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                 hash = ti.infoHash()
                 task.name = ti.name()
                 task.total = ti.totalSize()
+                // FIX 3.8.x: el .torrent ahora SI se añade a la sesión (antes
+                // solo se parseaba y la espera de metadata acababa en timeout)
+                if (sm.find(hash) == null) sm.download(ti, File(task.dir))
             }
             val h = hash ?: throw DlException("hash no disponible")
             task.putExtra("ih", h.toHex())
@@ -136,6 +240,23 @@ class TorrentDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                     task.total = t2.totalSize()
                     engine.db.update(task)
                 }
+            }
+
+            // selección de archivos (extra "skip": índices a NO descargar) y
+            // descarga secuencial (extra "seq"): decididos en el diálogo previo
+            val skip = task.extra().optString("skip", "")
+            if (skip.isNotEmpty()) {
+                val set = skip.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+                val tf = th.torrentFile()
+                if (tf != null && tf.isValid) {
+                    for (i in 0 until tf.files().numFiles()) {
+                        th.filePriority(i, if (i in set) Priority.IGNORE else Priority.NORMAL)
+                    }
+                }
+            }
+            if (task.extra().optBoolean("seq", false)) {
+                try { th.setFlags(com.frostwire.jlibtorrent.swig.libtorrent.getSequential_download()) }
+                catch (e: Exception) { }
             }
             th.resume()
 

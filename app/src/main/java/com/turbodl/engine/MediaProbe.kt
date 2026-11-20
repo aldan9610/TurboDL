@@ -77,10 +77,15 @@ object MediaProbe {
             size > 300
     }
 
-    /** Solicita la informacion; cb se invoca en el hilo principal. */
-    fun probe(url: String, headers: Map<String, String>, cb: (Info) -> Unit) {
-        val hit = synchronized(cache) { cache[url] }
-        if (hit != null) { cb(hit); return }
+    /** Solicita la informacion; cb se invoca en el hilo principal. Con
+     *  force=true se ignora la cache (re-sondeo bajo demanda del usuario).
+     *  cb es el ULTIMO parametro para poder pasarle el lambda final. */
+    fun probe(url: String, headers: Map<String, String>, force: Boolean = false,
+              cb: (Info) -> Unit) {
+        if (!force) {
+            val hit = synchronized(cache) { cache[url] }
+            if (hit != null) { cb(hit); return }
+        }
         pool.execute {
             val info = try { doProbe(url, headers) } catch (e: Exception) {
                 Info().apply { note = "sin datos" }

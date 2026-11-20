@@ -218,6 +218,7 @@ public final class AdBlockEngine {
             sb.append("- Motor: no se carga (bloqueador apagado)");
             return sb.toString();
         }
+        sb.append("- Sitios con bloqueo desactivado: ").append(exemptCount()).append('\n');
         if (state == STATE_READY) {
             FilterEngine eng = engine;
             sb.append("- Motor: KOTLIN LISTO (")
@@ -248,6 +249,95 @@ public final class AdBlockEngine {
         return url != null && (url.startsWith("http://") || url.startsWith("https://"));
     }
 
+    // ---------------- exención por sitio ("desactivar en este dominio") ----------------
+
+    /** Hosts/dominios con el bloqueo desactivado por decisión del usuario
+     *  (persistidos en prefs "adblockExempt" como array JSON). Cache en
+     *  memoria: shouldBlock corre en el hilo de red y no debe tocar prefs. */
+    private static volatile java.util.Set<String> exentasCache = null;
+
+    private static java.util.Set<String> exentas() {
+        java.util.Set<String> s = exentasCache;
+        if (s != null) return s;
+        synchronized (LOCK) {
+            if (exentasCache != null) return exentasCache;
+            java.util.Set<String> out = new java.util.HashSet<String>();
+            try {
+                String raw = com.turbodl.App.app.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                        .getString("adblockExempt", "[]");
+                org.json.JSONArray arr = new org.json.JSONArray(raw == null ? "[]" : raw);
+                for (int i = 0; i < arr.length(); i++) {
+                    out.add(arr.getString(i).toLowerCase(Locale.US));
+                }
+            } catch (Throwable e) { }
+            exentasCache = out;
+            return out;
+        }
+    }
+
+    /** Activa o desactiva el bloqueo para el sitio de pageUrl. Guarda el host
+     *  completo y su dominio base (ej.: www.ejemplo.com + ejemplo.com). */
+    public static void setExempt(Context ctx, String pageUrl, boolean on) {
+        String h = hostOf(pageUrl);
+        if (h.isEmpty()) return;
+        String base = baseDomainOf(h);
+        java.util.Set<String> s = new java.util.HashSet<String>(exentas());
+        if (on) {
+            s.add(h);
+            if (!base.isEmpty()) s.add(base);
+        } else {
+            s.remove(h);
+            s.remove(base);
+        }
+        try {
+            java.util.List<String> l = new java.util.ArrayList<String>(s);
+            java.util.Collections.sort(l);
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (String x : l) arr.put(x);
+            ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+                    .edit().putString("adblockExempt", arr.toString()).apply();
+        } catch (Throwable e) { }
+        exentasCache = s;
+    }
+
+    /** true si el bloqueo está desactivado para la página indicada. */
+    public static boolean exempted(String pageUrl) {
+        String h = hostOf(pageUrl);
+        if (h.isEmpty()) return false;
+        java.util.Set<String> s = exentas();
+        if (s.contains(h)) return true;
+        String b = baseDomainOf(h);
+        return !b.isEmpty() && s.contains(b);
+    }
+
+    /** Cuántos sitios tienen el bloqueo desactivado (para diagnóstico). */
+    public static int exemptCount() {
+        return exentas().size();
+    }
+
+    /** Host en minúsculas de una URL ("" si no se puede parsear). */
+    static String hostOf(String url) {
+        try {
+            String h = new java.net.URI(url).getHost();
+            return h == null ? "" : h.toLowerCase(Locale.US);
+        } catch (Throwable e) {
+            return "";
+        }
+    }
+
+    /** Dominio base aproximado: quita la primera etiqueta cuando hay
+     *  subdominio (www.ejemplo.com -> ejemplo.com) y devuelve el propio
+     *  host si ya es base (ejemplo.com -> ejemplo.com). "" si no hay
+     *  dominio (localhost, TLD suelto). */
+    static String baseDomainOf(String host) {
+        if (host == null || host.isEmpty()) return "";
+        int f = host.indexOf('.');
+        if (f < 0) return "";
+        int g = host.indexOf('.', f + 1);
+        if (g < 0) return host;
+        return host.substring(f + 1);
+    }
+
     /**
      * true si el subrecurso debe bloquearse. Sin motor (no listo o caído)
      * devuelve false SIEMPRE: fallar es dejar pasar, no bloquear de más.
@@ -256,6 +346,8 @@ public final class AdBlockEngine {
         FilterEngine eng = engine;
         if (eng == null || !httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return false;
         try {
+            // sitio con el bloqueo desactivado por el usuario: dejar pasar todo
+            if (exempted(pageUrl)) return false;
             // orden del motor: (recurso pedido, página, tipo). El frame
             // principal nunca llega aquí (lo excluye BrowserActivity).
             return eng.shouldBlock(reqUrl, pageUrl, type);
@@ -270,6 +362,7 @@ public final class AdBlockEngine {
         FilterEngine eng = engine;
         if (eng == null || !httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return "";
         try {
+            if (exempted(pageUrl)) return "";
             String p = eng.debugMatch(reqUrl, pageUrl, type);
             return (p == null || p.equals("-")) ? "" : p;
         } catch (Throwable e) {
@@ -283,6 +376,7 @@ public final class AdBlockEngine {
         FilterEngine eng = engine;
         if (eng == null || !httpLimpia(pageUrl)) return "";
         try {
+            if (exempted(pageUrl)) return "";
             String css = eng.cssFor(pageUrl, CSS_MAX);
             if (css == null) return "";
             return css;

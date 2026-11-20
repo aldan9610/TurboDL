@@ -79,6 +79,7 @@ class BrowserActivity : Activity() {
 
     /** Pestaña: WebView propio (se crea bajo demanda), url, titulo y miniatura. */
     inner class Tab(var url: String, var title: String) {
+        val uid: Long = tabSeq++ // identidad estable para asociar sus capturas
         var wv: WebView? = null
         var showHome: Boolean = url.isEmpty()
         var priv: Boolean = false // pestaña privada: sin historial ni persistencia
@@ -86,6 +87,7 @@ class BrowserActivity : Activity() {
         var blocked: Int = 0
         var popups: Int = 0        // ventanas emergentes bloqueadas
         var redirects: Int = 0     // redirecciones de anuncio bloqueadas
+        var lastUse: Long = 0      // última vez que se adjuntó (para recortar memoria)
         val blockedItems = ArrayList<String>() // detalles del escudo (cap 120)
     }
     private val tabs = ArrayList<Tab>()
@@ -101,6 +103,10 @@ class BrowserActivity : Activity() {
     private fun activeWv(): WebView? = if (cur in tabs.indices) tabs[cur].wv else null
 
     companion object {
+        /** Identificador único por pestaña: asocia las capturas de medios
+         *  a su pestaña aunque el WebView se recree. */
+        private var tabSeq = 0L
+
         private val MEDIA_RE = Regex(
             "\\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\\?|$)",
             RegexOption.IGNORE_CASE
@@ -287,6 +293,7 @@ class BrowserActivity : Activity() {
         var info: MediaProbe.Info? = null
         var probed = false
         var pageTitle: String = "" // titulo de la página que lo olfateó
+        var tabUid: Long = -1 // pestaña dueña de la captura (listas separadas)
     }
     private val detected = LinkedHashMap<String, Detected>()
     private val uiH = Handler(Looper.getMainLooper())
@@ -294,6 +301,16 @@ class BrowserActivity : Activity() {
     // cuadrícula de pestañas abierta (para refrescarla al cerrar una)
     private var tabsGridAdapter: BaseAdapter? = null
     private var tabsGridDlg: android.app.Dialog? = null
+    // hojas inferiores y sugerencias (interfaz 4.0, estilo navegador mínimo)
+    private lateinit var homeSearch: android.widget.EditText
+    private lateinit var suggestionsHost: LinearLayout
+    private lateinit var tabSheet: LinearLayout
+    private lateinit var tabListHost: LinearLayout
+    private lateinit var menuSheet: android.view.View
+    private lateinit var menuGrid: android.widget.GridLayout
+    private lateinit var menuDots: LinearLayout
+    private var menuPage = 0
+    @Volatile private var suppressSuggest = false
     // fusible anti-sobre-bloqueo del motor (cuenta por carga de página) y
     // aviso de red caída (para no confundir "sin conexión" con un fallo de la app)
     private var adFuseReq = 0
@@ -302,11 +319,14 @@ class BrowserActivity : Activity() {
     // reinicios del renderizador del WebView (presión de RAM en móviles humildes)
     private var rendererGoneCount = 0
     private var rendererGoneLast = ""
+    // estadísticas acumuladas de bloqueo por dominio (histórico, se guarda al salir)
+    private val blockStats = LinkedHashMap<String, Long>()
+    @Volatile private var statsDirty = false
 
-    inner class Bridge {
+    inner class Bridge(private val tabUid: Long) {
         @JavascriptInterface
         fun sniff(url: String, type: String, title: String) {
-            runOnUiThread { addDetected(url, type, title) }
+            runOnUiThread { addDetected(url, type, title, tabUid) }
         }
     }
 
@@ -350,12 +370,12 @@ class BrowserActivity : Activity() {
             } else web.reload()
         }
         findViewById<Button>(R.id.btnHome).setOnClickListener { showHome(!homeOverlay.isVisible()) }
-        btnVideos.setOnClickListener { showDetected() }
+        btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
-        btnTabCount.setOnClickListener { showTabs() }
-        btnNewTab.setOnClickListener { newTab("") }
+        btnTabCount.setOnClickListener { showTabSheet() }
+        btnNewTab.setOnClickListener { newTab(""); renderTabSheet() }
         setStripSwipeNewTab(stripScroll)
-        findViewById<Button>(R.id.btnMore).setOnClickListener { showBrowserMenu(it) }
+        findViewById<Button>(R.id.btnMore).setOnClickListener { showMenuSheet() }
         findViewById<Button>(R.id.btnAddSite).setOnClickListener { addSiteDialog() }
         findViewById<Button>(R.id.btnResetSites).setOnClickListener {
             saveSites(DEFAULT_SITES.toList())
@@ -364,10 +384,41 @@ class BrowserActivity : Activity() {
         }
 
         editUrl.setOnEditorActionListener { _, _, _ -> go(); true }
+        editUrl.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+            override fun afterTextChanged(s: android.text.Editable?) {
+                showSuggestions(s?.toString() ?: "")
+            }
+        })
         setupHistoryBar()
+
+        // buscador grande de la página de inicio (estilo 4.0)
+        homeSearch = findViewById(R.id.homeSearch)
+        homeSearch.setOnEditorActionListener { _, _, _ ->
+            val q = homeSearch.text.toString().trim()
+            if (q.isNotEmpty()) {
+                load(if (q.contains("://") || q.contains("."))
+                    (if (q.contains("://")) q else "https://$q")
+                    else Profiles.engineUrl(eng.sp, q))
+                hideKb()
+            }
+            true
+        }
+        // hojas inferiores: pestañas y menú
+        tabSheet = findViewById(R.id.tabSheet)
+        tabListHost = findViewById(R.id.tabListHost)
+        menuSheet = findViewById(R.id.menuSheet)
+        menuGrid = findViewById(R.id.menuGrid)
+        menuDots = findViewById(R.id.menuDots)
+        suggestionsHost = findViewById(R.id.suggestionsHost)
+        findViewById<Button>(R.id.btnMenuCollapse).setOnClickListener { hideSheets() }
+        findViewById<Button>(R.id.btnMenuExit).setOnClickListener { finishAffinity() }
 
         readerMode = eng.sp.getBoolean("readerMode", false)
         restoreTabs()
+        loadStats()
+        updateDetectBtn()
         showHome(true)
 
         // llegada directa con URL (p.ej. "abrir en navegador" desde el inicio)
@@ -456,6 +507,10 @@ class BrowserActivity : Activity() {
         pm.menu.add(0, 5, 14, "🍪 Limpiar cookies y caché")
         pm.menu.add(0, 7, 15, "📌 Añadir esta página a accesos")
         pm.menu.add(0, 17, 16, "🧪 Diagnóstico del navegador")
+        val exento = curTab?.url?.let { AdBlockEngine.exempted(it) } == true
+        pm.menu.add(0, 18, 17,
+            if (exento) "🛡 Reactivar bloqueo en este sitio" else "🚫 Desactivar bloqueo en este sitio")
+        pm.menu.add(0, 19, 18, "🖼 Vídeo en ventana flotante (PiP)")
         pm.setOnMenuItemClickListener { mi ->
             when (mi.itemId) {
                 1 -> showEngineMenu(v)
@@ -477,10 +532,36 @@ class BrowserActivity : Activity() {
                 5 -> clearPrivacy()
                 7 -> addCurrentAsSite()
                 17 -> showDiagnostico()
+                18 -> toggleSiteExempt(curTab?.url ?: "")
+                19 -> enterPip()
             }
             true
         }
         pm.show()
+    }
+
+    /** Exención del bloqueador para el sitio de la pestaña activa. */
+    private fun toggleSiteExempt(page: String) {
+        if (!page.startsWith("http")) { toast("Abre una página web primero"); return }
+        val nv = !AdBlockEngine.exempted(page)
+        AdBlockEngine.setExempt(this, page, nv)
+        toast(if (nv)
+            "Bloqueo desactivado en ${MediaProbe.hostOf(page)} (se reactiva desde este mismo menú)"
+        else "Bloqueo reactivado en ${MediaProbe.hostOf(page)}")
+        tabs.forEach { it.wv?.reload() }
+    }
+
+    /** Vídeo en ventana flotante: la página (con su <video>) sigue visible
+     *  en PiP mientras se navega o se consultan las descargas. */
+    private fun enterPip() {
+        try {
+            val params = android.app.PictureInPictureParams.Builder()
+                .setAspectRatio(android.util.Rational(16, 9))
+                .build()
+            enterPictureInPictureMode(params)
+        } catch (e: Exception) {
+            toast("PiP no disponible: ${e.message}")
+        }
     }
 
     /** Panel de diagnóstico: estado real del motor, RAM del dispositivo,
@@ -490,8 +571,11 @@ class BrowserActivity : Activity() {
     private fun showDiagnostico() {
         val t = if (cur in tabs.indices) tabs[cur] else null
         val msg = StringBuilder()
-        msg.append("TurboDL 3.5.2 (Android ").append(android.os.Build.VERSION.RELEASE)
-            .append(")\n\n")
+        val vName = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (e: Exception) { "?" }
+        msg.append("TurboDL ").append(vName).append(" (Android ")
+            .append(android.os.Build.VERSION.RELEASE).append(")\n\n")
         try {
             val pi = packageManager.getPackageInfo("com.google.android.webview", 0)
             msg.append("Visor web (WebView): ").append(pi.versionName).append('\n')
@@ -601,6 +685,11 @@ class BrowserActivity : Activity() {
 
     private fun load(url: String) {
         homeOverlay.visibility = View.GONE
+        hideSheets()
+        suppressSuggest = true
+        editUrl.setText(url)
+        suppressSuggest = false
+        editUrl.clearFocus()
         val t = tabs[if (cur in tabs.indices) cur else 0]
         t.url = url
         t.showHome = false
@@ -617,8 +706,11 @@ class BrowserActivity : Activity() {
         if (cur in tabs.indices) tabs[cur].showHome = show
         if (show) {
             refreshSites()
+            hideSuggestions()
+            hideSheets()
             hideKb()
         }
+        updateShield()
     }
 
     private fun hideKb() {
@@ -689,7 +781,7 @@ class BrowserActivity : Activity() {
         ws.useWideViewPort = true
         ws.cacheMode = WebSettings.LOAD_DEFAULT
         Ui.applyUa(w, eng.sp, desktopMode)
-        w.addJavascriptInterface(Bridge(), "__tdlBridge")
+        w.addJavascriptInterface(Bridge(t.uid), "__tdlBridge")
         w.webViewClient = client
         w.webChromeClient = chrome
         w.setDownloadListener { url, _, _, _, _ ->
@@ -719,9 +811,42 @@ class BrowserActivity : Activity() {
         webHost.addView(w, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         w.onResume()
+        t.lastUse = System.currentTimeMillis()
         tabs.forEach { o -> if (o !== t) o.wv?.onPause() }
         updateShield()
+        updateDetectBtn()
         homeOverlay.visibility = if (t.showHome && t.url.isEmpty()) View.VISIBLE else View.GONE
+        trimTabs(4)
+    }
+
+    /**
+     * Libera los WebViews de las pestañas menos usadas recientemente.
+     * En móviles de 1 GB cada WebView vivo pesa decenas de MB: mantener
+     * todas las pestañas renderizadas acaba en reinicios del visor. La
+     * pestaña recortada conserva url, título y capturas de medios; al
+     * volver a ella se recarga (mismo efecto que matar el proceso).
+     */
+    private fun trimTabs(keep: Int) {
+        val inactive = tabs.filterIndexed { i, t -> i != cur && t.wv != null }
+            .sortedByDescending { it.lastUse }
+        for (t in inactive.drop(keep.coerceAtLeast(0))) {
+            t.wv?.let { w ->
+                try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+            }
+            t.wv = null
+            try { t.thumb?.recycle() } catch (e: Exception) { }
+            t.thumb = null
+        }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // aviso del sistema de presión de memoria: recortar más agresivo
+        when {
+            level >= TRIM_MEMORY_RUNNING_CRITICAL -> trimTabs(0)
+            level >= TRIM_MEMORY_RUNNING_LOW -> trimTabs(1)
+            level >= TRIM_MEMORY_RUNNING_MODERATE -> trimTabs(3)
+        }
     }
 
     /** Copia al objeto Tab lo que el WebView activo tiene ahora mismo. */
@@ -779,6 +904,7 @@ class BrowserActivity : Activity() {
             }
             t.thumb = null
         }
+        purgeTabMedia(tabs[index].uid)
         tabs.removeAt(index)
         if (tabs.isEmpty()) {
             tabs.add(Tab("", ""))
@@ -812,7 +938,7 @@ class BrowserActivity : Activity() {
     }
 
     private fun updateTabButton() {
-        btnTabCount.text = "🗂 ${tabCount()}"
+        btnTabCount.text = "[${tabCount()}]"
         if (cur in tabs.indices) {
             val t = tabs[cur]
             btnTabCount.contentDescription =
@@ -977,6 +1103,7 @@ class BrowserActivity : Activity() {
 
     private fun closeOthers(keep: Int) {
         for (i in tabs.indices.reversed()) if (i != keep) {
+            purgeTabMedia(tabs[i].uid)
             tabs[i].wv?.let { w ->
                 try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
             }
@@ -1065,6 +1192,7 @@ class BrowserActivity : Activity() {
         b("Cerrar todas") {
             dlgRef[0]?.dismiss()
             tabs.forEach { t ->
+                purgeTabMedia(t.uid)
                 t.wv?.let { w ->
                     try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
                 }
@@ -1254,6 +1382,7 @@ class BrowserActivity : Activity() {
         syncActive()
         persistTabs()
         tabs.forEach { it.wv?.onPause() }
+        flushStats()
         super.onPause()
     }
 
@@ -1543,7 +1672,8 @@ class BrowserActivity : Activity() {
                             if (hT.isNotEmpty() && hT != hC && baseOf(hT) != baseOf(hC)) {
                                 val block = if (AdBlockEngine.ready())
                                     AdBlockEngine.shouldBlock(cur, u, "popup")
-                                else REDIRECT_HOSTS.any { hT.contains(it) }
+                                else !AdBlockEngine.exempted(cur) &&
+                                    REDIRECT_HOSTS.any { hT.contains(it) }
                                 if (block) {
                                     val t = tabOf(view)
                                     if (t != null) {
@@ -1568,7 +1698,8 @@ class BrowserActivity : Activity() {
         ): WebResourceResponse? {
             val u = request?.url?.toString() ?: return null
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
-                addDetected(Kit.normalizeSniffUrl(u), "req")
+                addDetected(Kit.normalizeSniffUrl(u), "req",
+                    tabUid = tabOf(view)?.uid ?: tabs.getOrNull(cur)?.uid ?: -1)
             // bloqueador de anuncios: motor 100% Kotlin (EasyList + EasyPrivacy,
             // semantica EasyList); si aun no esta listo o fallo, cae a la
             // lista compacta de hosts que existia antes. Nunca debe lanzar:
@@ -1596,7 +1727,9 @@ class BrowserActivity : Activity() {
                                     "se usa la lista básica")
                             }
                         }
-                    } else if (host.isNotEmpty() && AD_HOSTS.any { host.contains(it) }) {
+                    } else if (host.isNotEmpty() &&
+                        !AdBlockEngine.exempted(view?.url ?: u) &&
+                        AD_HOSTS.any { host.contains(it) }) {
                         block = true
                     }
                     if (block) {
@@ -1683,10 +1816,13 @@ class BrowserActivity : Activity() {
         (java.net.URI(u).host ?: "").lowercase(Locale.US)
     } catch (e: Exception) { "" }
 
-    /** dominio base aproximado (últimas dos etiquetas) */
+    /** dominio base aproximado: quita la primera etiqueta si hay subdominio
+     *  (www.ejemplo.com -> ejemplo.com); el host de 2 etiquetas ya es base */
     private fun baseOf(h: String): String {
         val f = h.indexOf('.')
-        return if (f < 0) h else h.substring(f + 1)
+        if (f < 0) return ""
+        val g = h.indexOf('.', f + 1)
+        return if (g < 0) h else h.substring(f + 1)
     }
 
     private fun pathOf(u: String): String {
@@ -1715,24 +1851,82 @@ class BrowserActivity : Activity() {
                 }
             }
         }
+        statBump(t)
         if (tabs.getOrNull(cur) === t) runOnUiThread { updateShield() }
+    }
+
+    // ---------------- estadísticas acumuladas de bloqueo ----------------
+
+    /** Suma un bloqueo al histórico del dominio de la pestaña (en memoria;
+     *  se persiste en onPause/onDestroy). */
+    private fun statBump(t: Tab) {
+        val host = hostOf(t.url)
+        if (host.isEmpty()) return
+        val key = baseOf(host)
+        if (key.isEmpty()) return
+        synchronized(blockStats) {
+            blockStats[key] = (blockStats[key] ?: 0L) + 1L
+            if (blockStats.size > 200) {
+                // cap: expulsa el dominio con menos bloqueos acumulados
+                val minKey = blockStats.entries.minByOrNull { it.value }?.key
+                if (minKey != null) blockStats.remove(minKey)
+            }
+        }
+        statsDirty = true
+    }
+
+    private fun loadStats() {
+        synchronized(blockStats) {
+            blockStats.clear()
+            try {
+                val o = JSONObject(eng.sp.getString("blockStats", "{}") ?: "{}")
+                val it = o.keys()
+                while (it.hasNext()) {
+                    val k = it.next()
+                    blockStats[k] = o.optLong(k, 0L)
+                }
+            } catch (e: Exception) { }
+        }
+    }
+
+    private fun flushStats() {
+        if (!statsDirty) return
+        synchronized(blockStats) {
+            try {
+                val o = JSONObject()
+                for ((k, v) in blockStats) o.put(k, v)
+                eng.sp.edit().putString("blockStats", o.toString()).apply()
+                statsDirty = false
+            } catch (e: Exception) { }
+        }
     }
 
     private fun updateShield() {
         val t = tabs.getOrNull(cur)
         val n = t?.blocked ?: 0
-        findViewById<Button>(R.id.btnShield).text = if (n > 0) "🛡$n" else "🛡"
+        // estilo 4.0: lupa en el inicio, escudo con contador al navegar
+        findViewById<Button>(R.id.btnShield).text =
+            if (homeOverlay.isVisible()) "🔍"
+            else (if (n > 0) "🛡$n" else "🛡")
     }
 
     /** Detalles de lo bloqueado en la página activa (subrecursos, reglas,
-     *  ventanas y redirecciones). */
+     *  ventanas y redirecciones) + acción de exención del sitio. */
     private fun showBlockedDialog() {
         val t = tabs.getOrNull(cur) ?: return
+        val page = t.url
         val sb = StringBuilder()
         val subs = (t.blocked - t.popups - t.redirects).coerceAtLeast(0)
         sb.append("Subrecursos bloqueados: $subs")
         if (t.popups > 0) sb.append("\nVentanas emergentes bloqueadas: ${t.popups}")
         if (t.redirects > 0) sb.append("\nRedirecciones de anuncio bloqueadas: ${t.redirects}")
+        // histórico acumulado por dominio (se conserva entre sesiones)
+        val key = baseOf(hostOf(page))
+        val acum = synchronized(blockStats) { blockStats[key] ?: 0L }
+        val total = synchronized(blockStats) { blockStats.values.sum() }
+        if (page.startsWith("http")) {
+            sb.append("\nAcumulado en este sitio: $acum · total histórico: $total")
+        }
         val items = synchronized(t.blockedItems) { t.blockedItems.toList() }
         val cuerpo = if (items.isEmpty()) {
             sb.toString() + "\n\nTodavía no se ha bloqueado nada en esta página."
@@ -1746,10 +1940,15 @@ class BrowserActivity : Activity() {
         tv.setPadding(50, 40, 50, 20)
         val sv = android.widget.ScrollView(this)
         sv.addView(tv)
+        val exento = AdBlockEngine.exempted(page)
+        val accion = if (exento) "✅ Reactivar bloqueo aquí" else "🚫 Desactivar bloqueo aquí"
         android.app.AlertDialog.Builder(this)
             .setTitle("🛡 Bloqueos en esta página")
             .setView(sv)
             .setPositiveButton("Cerrar", null)
+            .setNeutralButton(accion) { _, _ ->
+                toggleSiteExempt(page)
+            }
             .show()
     }
 
@@ -1865,7 +2064,7 @@ class BrowserActivity : Activity() {
     }
 
     @Synchronized
-    private fun addDetected(url: String, type: String, title: String = "") {
+    private fun addDetected(url: String, type: String, title: String = "", tabUid: Long = -1) {
         if (detected.size > 200) return
         if (detected.containsKey(url)) return
         val keep = Kit.isVideoOrAudio(url) || url.contains("m3u8") ||
@@ -1873,11 +2072,353 @@ class BrowserActivity : Activity() {
             DETECT_RE.containsMatchIn(url)
         if (!keep) return
         detected[url] = Detected(url, type)
+        detected[url]?.tabUid = tabUid
         if (title.isNotBlank()) detected[url]?.pageTitle = title
-        btnVideos.text = "⬇ Detectados: ${detected.size}"
+        updateDetectBtn()
         // sondeo automatico en background nada mas snifear: al abrir la
         // lista la duracion/tamano ya estan resueltos (o llegan en vivo)
         uiH.postDelayed({ kickProbes() }, 500)
+    }
+
+    /**
+     * Contador del botón de medios: SOLO la pestaña activa. Cada pestaña
+     * tiene su propia lista de capturas (informe del usuario: al cambiar
+     * de pestaña aparecía todo unificado y no se sabía qué era de qué).
+     */
+    private fun updateDetectBtn() {
+        val uid = tabs.getOrNull(cur)?.uid ?: -1
+        val n = synchronized(detected) { detected.values.count { it.tabUid == uid } }
+        btnVideos.text = if (n > 0) "⬇ Detectados: $n" else "⬇ Detectados"
+    }
+
+    /** Quita las capturas de una pestaña (al cerrarla). */
+    private fun purgeTabMedia(uid: Long) {
+        synchronized(detected) {
+            detected.values.removeAll { it.tabUid == uid }
+        }
+        updateDetectBtn()
+    }
+
+    // ================= hojas inferiores y sugerencias (interfaz 4.0) =================
+
+    private fun hideSheets() {
+        tabSheet.visibility = View.GONE
+        menuSheet.visibility = View.GONE
+    }
+
+    /** Conmutador de pestañas: hoja inferior con una fila por pestaña
+     *  (favicon circular + título + ✕) y botón «+» para abrir otra. */
+    private fun showTabSheet() {
+        hideSheets()
+        renderTabSheet()
+        tabSheet.visibility = View.VISIBLE
+    }
+
+    private fun renderTabSheet() {
+        tabListHost.removeAllViews()
+        tabs.forEachIndexed { i, t -> tabListHost.addView(tabRowView(i, t)) }
+    }
+
+    private fun tabRowView(i: Int, t: Tab): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(16), dp(10), dp(8), dp(10))
+        row.background = getDrawable(android.R.drawable.list_selector_background)
+        // favicon circular: letra inicial sobre color derivado del host
+        val fav = TextView(this)
+        fav.textSize = 15f
+        fav.gravity = Gravity.CENTER
+        val host = MediaProbe.hostOf(t.url)
+        val bgc = GradientDrawable()
+        bgc.shape = GradientDrawable.OVAL
+        bgc.setColor(if (t.url.isEmpty()) 0xFF8A8A8A.toInt()
+        else Color.HSVToColor(floatArrayOf(
+            (Math.abs(host.hashCode()) % 360).toFloat(), 0.55f, 0.62f)))
+        fav.background = bgc
+        fav.setTextColor(Color.WHITE)
+        fav.text = host.ifEmpty { "T" }.take(1).uppercase(Locale.US)
+        fav.layoutParams = LinearLayout.LayoutParams(dp(30), dp(30))
+        row.addView(fav)
+        val tv = TextView(this)
+        tv.textSize = 14f
+        tv.setSingleLine(true)
+        tv.ellipsize = android.text.TextUtils.TruncateAt.END
+        tv.setPadding(dp(12), 0, dp(8), 0)
+        tv.text = (if (t.priv) "🕵 " else "") +
+            t.title.ifEmpty { if (t.url.isEmpty()) "Inicio" else host }
+        tv.setTextColor(if (i == cur) 0xFF1565C0.toInt() else 0xFF212121.toInt())
+        row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val x = TextView(this)
+        x.text = "✕"
+        x.textSize = 15f
+        x.setPadding(dp(12), dp(4), dp(12), dp(4))
+        x.setTextColor(0xFF5A5A5A.toInt())
+        x.contentDescription = "Cerrar ${tv.text.take(20)}"
+        x.setOnClickListener {
+            closeTab(i)
+            if (tabsGridDlg?.isShowing == true || tabSheet.visibility == View.VISIBLE)
+                renderTabSheet()
+            if (tabs.isEmpty()) hideSheets()
+        }
+        row.addView(x)
+        row.setOnClickListener { switchTab(i); hideSheets() }
+        row.setOnLongClickListener {
+            AlertDialog.Builder(this)
+                .setTitle(tv.text.take(40))
+                .setItems(arrayOf("✕ Cerrar pestaña", "🗐 Cerrar las demás")) { _, w ->
+                    if (w == 0) closeTab(i) else closeOthers(i)
+                    renderTabSheet()
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            true
+        }
+        return row
+    }
+
+    private class MenuCell(
+        val icon: String, val label: String,
+        val active: Boolean = false, val action: () -> Unit)
+
+    /** Menú inferior en cuadrícula de 5 columnas y 2 filas por página,
+     *  con puntos de página y botones salir/colapsar (estilo 4.0). */
+    private fun showMenuSheet() {
+        hideSheets()
+        menuPage = 0
+        renderMenuPage()
+        menuSheet.visibility = View.VISIBLE
+    }
+
+    private fun renderMenuPage() {
+        menuGrid.removeAllViews()
+        for (c in menuCells(menuPage)) menuGrid.addView(menuCell(c))
+        menuDots.removeAllViews()
+        for (i in 0 until 2) {
+            val dot = TextView(this)
+            dot.text = "•"
+            dot.textSize = 18f
+            dot.setPadding(dp(6), 0, dp(6), 0)
+            dot.setTextColor(if (i == menuPage) 0xFFFF6D00.toInt() else 0xFFCCCCCC.toInt())
+            dot.setOnClickListener { menuPage = i; renderMenuPage() }
+            menuDots.addView(dot)
+        }
+    }
+
+    /** Las dos páginas del menú: navegación/ajustes y herramientas de la
+     *  página. Todos los botones corresponden a funciones reales. */
+    private fun menuCells(page: Int): List<MenuCell> {
+        val t = tabs.getOrNull(cur)
+        val pageUrl = t?.url ?: ""
+        return if (page == 0) listOf(
+            MenuCell("🌙", "Modo nocturno") { toggleDarkTheme() },
+            MenuCell("⭐", "Marcadores") { hideSheets(); showBookmarks() },
+            MenuCell("🕘", "Historial") { hideSheets(); showPageHistory() },
+            MenuCell("⬇", "Detectados") { hideSheets(); showDetected() },
+            MenuCell("🕵", "Incógnito") { newTab("", privateTab = true); hideSheets() },
+            MenuCell("↗", "Compartir") { hideSheets(); sharePage() },
+            MenuCell("☆+", "Añadir marcador") { addBookmark(pageUrl, web.title ?: ""); hideSheets() },
+            MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPage() },
+            MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
+            MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) }
+        ) else listOf(
+            MenuCell("🛡", "Bloqueos") { hideSheets(); showBlockedDialog() },
+            MenuCell("🛡", "Bloqueador", active = eng.sp.getBoolean("adblock", true)) {
+                val nv = !eng.sp.getBoolean("adblock", true)
+                eng.sp.edit().putBoolean("adblock", nv).apply()
+                toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
+                tabs.forEach { it.wv?.reload() }
+                renderMenuPage()
+            },
+            MenuCell("🚫", "Eximir sitio") { hideSheets(); toggleSiteExempt(pageUrl) },
+            MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPage() },
+            MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
+            MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPage() },
+            MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
+            MenuCell("🖼", "Ventana flot.") { hideSheets(); enterPip() },
+            MenuCell("🔎", "Escanear medios") { hideSheets(); inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") },
+            MenuCell("🚪", "Salir") { finishAffinity() }
+        )
+    }
+
+    private fun menuCell(c: MenuCell): View {
+        val cell = LinearLayout(this)
+        cell.orientation = LinearLayout.VERTICAL
+        cell.gravity = Gravity.CENTER
+        cell.setPadding(dp(4), dp(10), dp(4), dp(10))
+        cell.background = getDrawable(android.R.drawable.list_selector_background)
+        val ic = TextView(this)
+        ic.text = c.icon
+        ic.textSize = 22f
+        ic.gravity = Gravity.CENTER
+        ic.setTextColor(if (c.active) 0xFF1565C0.toInt() else 0xFF212121.toInt())
+        cell.addView(ic)
+        val lb = TextView(this)
+        lb.text = c.label
+        lb.textSize = 11f
+        lb.gravity = Gravity.CENTER
+        lb.maxLines = 2
+        lb.setPadding(dp(2), dp(4), dp(2), 0)
+        lb.setTextColor(if (c.active) 0xFF1565C0.toInt() else 0xFF3A3A3A.toInt())
+        cell.addView(lb)
+        val lp = android.widget.GridLayout.LayoutParams()
+        lp.width = 0
+        lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+        lp.columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+        lp.rowSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+        cell.layoutParams = lp
+        cell.setOnClickListener { c.action() }
+        return cell
+    }
+
+    /** Tema claro/oscuro desde el menú (recrea la actividad). */
+    private fun toggleDarkTheme() {
+        val nv = if (Ui.themeMode(this) == 1) 0 else 1
+        eng.sp.edit().putInt("themeMode", nv).apply()
+        recreate()
+    }
+
+    private fun sharePage() {
+        val u = tabs.getOrNull(cur)?.url ?: return
+        if (!u.startsWith("http")) { toast("Abre una página primero"); return }
+        try {
+            val i = android.content.Intent(android.content.Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(android.content.Intent.EXTRA_TEXT, u)
+            startActivity(android.content.Intent.createChooser(i, "Compartir página"))
+        } catch (e: Exception) {
+            toast("No se pudo compartir")
+        }
+    }
+
+    /** Buscar texto dentro de la página (resaltado nativo del WebView). */
+    private fun findInPage() {
+        val e = android.widget.EditText(this)
+        e.hint = "Texto a buscar"
+        e.setSingleLine(true)
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(50, 30, 50, 0)
+        lay.addView(e)
+        AlertDialog.Builder(this)
+            .setTitle("Buscar en la página")
+            .setView(lay)
+            .setPositiveButton("Buscar") { _, _ ->
+                val q = e.text.toString().trim()
+                if (q.isNotEmpty()) {
+                    try {
+                        web.findAllAsync(q)
+                        toast("Buscando «$q»…")
+                    } catch (ex: Exception) {
+                        toast("No disponible: ${ex.message}")
+                    }
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ================= sugerencias de la barra superior (interfaz 4.0) =================
+
+    private fun hideSuggestions() {
+        suggestionsHost.visibility = View.GONE
+    }
+
+    /** Panel de sugerencias bajo la barra superior: URL directa, marcadores,
+     *  historial de páginas y búsquedas previas filtrados por lo tecleado. */
+    private fun showSuggestions(q: String) {
+        if (suppressSuggest || q.isBlank()) { hideSuggestions(); return }
+        val low = q.lowercase(Locale.US)
+        val rows = ArrayList<Array<String>>() // [icono, titulo, url]
+        val uq = q.trim()
+        if (uq.contains(".") && !uq.contains(" ")) {
+            rows.add(arrayOf("↗", "Ir a $uq",
+                if (uq.startsWith("http")) uq else "https://$uq"))
+        }
+        try {
+            val arr = JSONArray(eng.sp.getString("bookmarks", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                if (rows.size > 8) break
+                val o = arr.optJSONObject(i) ?: continue
+                val t = o.optString("t", "")
+                val u = o.optString("u", "")
+                if (t.lowercase(Locale.US).contains(low) ||
+                    u.lowercase(Locale.US).contains(low))
+                    rows.add(arrayOf("☆", t.ifEmpty { MediaProbe.hostOf(u) }, u))
+            }
+        } catch (e: Exception) { }
+        try {
+            for (r in eng.db.history(50)) {
+                if (rows.size > 10) break
+                if (r.url.startsWith("http") &&
+                    ((r.title.ifEmpty { r.url }).lowercase(Locale.US).contains(low) ||
+                        r.url.lowercase(Locale.US).contains(low)))
+                    rows.add(arrayOf("🕘", (r.title.ifEmpty { r.url }).take(60), r.url))
+            }
+        } catch (e: Exception) { }
+        try {
+            for (h in history()) {
+                if (rows.size > 12) break
+                if (h.lowercase(Locale.US).contains(low))
+                    rows.add(arrayOf("🔎", h, Profiles.engineUrl(eng.sp, h)))
+            }
+        } catch (e: Exception) { }
+        if (rows.isEmpty()) { hideSuggestions(); return }
+        suggestionsHost.removeAllViews()
+        for (r in rows) suggestionsHost.addView(suggestionRow(r[0], r[1], r[2]))
+        suggestionsHost.visibility = View.VISIBLE
+    }
+
+    private fun suggestionRow(icon: String, title: String, url: String): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(14), dp(9), dp(6), dp(9))
+        row.background = getDrawable(android.R.drawable.list_selector_background)
+        val ic = TextView(this)
+        ic.text = icon
+        ic.textSize = 15f
+        ic.setPadding(dp(4), 0, dp(10), 0)
+        row.addView(ic)
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        val t1 = TextView(this)
+        t1.textSize = 13.5f
+        t1.setSingleLine(true)
+        t1.ellipsize = android.text.TextUtils.TruncateAt.END
+        t1.text = title
+        t1.setTextColor(0xFF212121.toInt())
+        col.addView(t1)
+        val t2 = TextView(this)
+        t2.textSize = 11f
+        t2.setSingleLine(true)
+        t2.ellipsize = android.text.TextUtils.TruncateAt.END
+        t2.text = url
+        t2.setTextColor(0xFF9E9E9E.toInt())
+        col.addView(t2)
+        row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val go = TextView(this)
+        go.text = "↖"
+        go.textSize = 15f
+        go.setPadding(dp(10), dp(6), dp(10), dp(6))
+        go.contentDescription = "Abrir en nueva pestaña"
+        go.setOnClickListener {
+            suppressSuggest = true
+            editUrl.setText(url)
+            suppressSuggest = false
+            newTab(url, true)
+            hideSuggestions()
+            hideKb()
+        }
+        row.addView(go)
+        row.setOnClickListener {
+            suppressSuggest = true
+            editUrl.setText(url)
+            suppressSuggest = false
+            load(url)
+            hideKb()
+        }
+        return row
     }
 
     /** Sonda en background de todo medio pendiente; 4 hilos concurrentes. */
@@ -1920,7 +2461,9 @@ class BrowserActivity : Activity() {
     private fun sortMode(): Int = eng.sp.getInt("sortMedia", 0)
 
     private fun sortedDetected(): List<Detected> {
-        val list = detected.values.toList()
+        // SOLO la pestaña activa: cada pestaña tiene su lista propia
+        val uid = tabs.getOrNull(cur)?.uid ?: -1
+        val list = synchronized(detected) { detected.values.filter { it.tabUid == uid } }
         return when (sortMode()) {
             1 -> list.sortedByDescending { it.info?.size ?: -1 }
             2 -> list.sortedBy { it.info?.size ?: Long.MAX_VALUE }
@@ -1933,8 +2476,10 @@ class BrowserActivity : Activity() {
     }
 
     private fun showDetected() {
-        if (detected.isEmpty()) {
-            toast("Aún no se detectan videos en esta página")
+        val uid = tabs.getOrNull(cur)?.uid ?: -1
+        val mine = synchronized(detected) { detected.values.count { it.tabUid == uid } }
+        if (mine == 0) {
+            toast("Aún no se detectan videos en ESTA pestaña")
             return
         }
         // relanzar sondeos pendientes (con cookies/referer de la pagina)
@@ -1983,14 +2528,15 @@ class BrowserActivity : Activity() {
                 .show()
         }
         btnClear.setOnClickListener {
-            detected.clear()
-            MediaProbe.clearCache()
-            btnVideos.text = "⬇ Detectados: 0"
+            val cu = tabs.getOrNull(cur)?.uid ?: -1
+            synchronized(detected) { detected.values.removeAll { it.tabUid == cu } }
+            updateDetectBtn()
             dlgRef?.dismiss()
+            toast("Capturas de esta pestaña limpiadas")
         }
 
         val dlg = AlertDialog.Builder(this)
-            .setTitle("Medios detectados (${detected.size})")
+            .setTitle("Medios detectados: $mine en esta pestaña")
             .setView(dlgView)
             .setNeutralButton("Cerrar", null)
             .create()
@@ -2016,10 +2562,16 @@ class BrowserActivity : Activity() {
 
     private fun showMediaActions(parentDlg: android.app.Dialog, d: Detected) {
         val labels = ArrayList<String>()
+        val info = d.info
+        val esStream = d.url.substringBefore('?').let {
+            it.endsWith(".m3u8") || it.endsWith(".mpd") || it.contains("/api/manifest/dash")
+        }
+        // la elección de calidad PRIMERO cuando hay variantes; si el sondeo
+        // automático aún no las resolvió, ofrecer analizarlas al momento
+        if (info != null && info.variants.any { !it.isAudio }) labels.add("🎚 Elegir calidad…")
+        else if (esStream) labels.add("🔎 Analizar calidades…")
         labels.add("⬇ Descargar ahora")
         labels.add("⏳ Añadir a la cola")
-        val info = d.info
-        if (info != null && info.variants.any { !it.isAudio }) labels.add("🎚 Elegir calidad…")
         val audioVar = info?.variants?.firstOrNull { it.isAudio }
         if (info?.audioUrl != null || audioVar != null) labels.add("🎵 Descargar solo audio")
         labels.add("🔗 Copiar enlace")
@@ -2028,9 +2580,10 @@ class BrowserActivity : Activity() {
             .setTitle(Kit.fmtOf(d.url) + " · " + (info?.line() ?: MediaProbe.hostOf(d.url)))
             .setItems(labels.toTypedArray()) { _, which ->
                 when {
+                    labels[which].startsWith("🎚") -> showVariants(d, false)
+                    labels[which].startsWith("🔎") -> analyzeVariants(d, false)
                     labels[which].startsWith("⬇") -> startDownload(d, null, false)
                     labels[which].startsWith("⏳") -> startDownload(d, null, true)
-                    labels[which].startsWith("🎚") -> showVariants(d, false)
                     labels[which].startsWith("🎵") -> showVariants(d, true)
                     labels[which].startsWith("🔗") -> {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -2040,6 +2593,36 @@ class BrowserActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    /**
+     * Analiza el manifiesto bajo demanda (sondeo forzado, sin caché) y
+     * abre el selector de calidades. Cubre el informe del usuario: streams
+     * m3u8 cuyas variantes no llegaron a resolverse en el sondeo automático.
+     */
+    private fun analyzeVariants(d: Detected, onlyAudio: Boolean) {
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Analizando el stream…")
+            .setMessage("Leyendo el manifiesto y resolviendo calidades…")
+            .setCancelable(false)
+            .create()
+        dlg.show()
+        val headers = HashMap<String, String>()
+        try {
+            headers["User-Agent"] = web.settings.userAgentString
+            val ck = CookieManager.getInstance().getCookie(d.url)
+            if (!ck.isNullOrBlank()) headers["Cookie"] = ck
+            val page = web.url
+            if (!page.isNullOrBlank()) headers["Referer"] = page
+        } catch (e: Exception) { }
+        MediaProbe.probe(d.url, headers, force = true) { info ->
+            dlg.dismiss()
+            d.info = info
+            d.probed = true
+            val vars = info.variants.filter { if (onlyAudio) it.isAudio else !it.isAudio }
+            if (vars.isEmpty()) toast("No se han encontrado calidades para este stream")
+            else showVariants(d, onlyAudio)
+        }
     }
 
     private fun showVariants(d: Detected, onlyAudio: Boolean) {
@@ -2071,15 +2654,28 @@ class BrowserActivity : Activity() {
         startDownloadRaw(d.url, variant?.extraJson, enqueue)
     }
 
-    /** Descarga de un enlace (deteccion o listener del WebView) preguntando si va a la cola. */
+    /** Descarga de un enlace (deteccion o listener del WebView) preguntando si va a la cola.
+     *  Para streams (m3u8/mpd) ofrece también ELEGIR LA CALIDAD concreta:
+     *  el motor acepta la variante elegida vía extra "variantUrl". */
     private fun askDownload(url: String, extraJson: String?) {
-        AlertDialog.Builder(this)
+        val low = url.substringBefore('?').substringBefore('#').lowercase(Locale.US)
+        val esStream = low.endsWith(".m3u8") || low.endsWith(".mpd") ||
+            low.contains("/api/manifest/dash")
+        val dlg = AlertDialog.Builder(this)
             .setTitle("Descarga detectada")
             .setMessage(MediaProbe.hostOf(url) + " — " + url.takeLast(80))
             .setPositiveButton("⬇ Ahora") { _, _ -> startDownloadRaw(url, extraJson, false) }
             .setNegativeButton("⏳ Cola") { _, _ -> startDownloadRaw(url, extraJson, true) }
-            .setNeutralButton("Cancelar", null)
-            .show()
+        if (esStream) {
+            dlg.setNeutralButton("🎚 Elegir calidad") { _, _ ->
+                analyzeVariants(Detected(url, "captura").apply {
+                    tabUid = tabs.getOrNull(cur)?.uid ?: -1
+                }, false)
+            }
+        } else {
+            dlg.setNeutralButton("Cancelar", null)
+        }
+        dlg.show()
     }
 
     private fun startDownloadRaw(url: String, variantExtra: String?, enqueue: Boolean) {
@@ -2155,6 +2751,7 @@ class BrowserActivity : Activity() {
     }
 
     override fun onDestroy() {
+        flushStats()
         tabs.forEach { t ->
             t.wv?.let { w ->
                 try {

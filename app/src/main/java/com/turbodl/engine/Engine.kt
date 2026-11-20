@@ -45,6 +45,8 @@ class Engine(val ctx: Context) {
     private val active = HashMap<Long, Downloader>()
     private val lastDone = HashMap<Long, Long>()
     private var lastSave = 0L
+    private var lastSpaceCheck = 0L
+    private var lastSpaceTold = 0L
     private var safStore: SafStore? = null
     private var safUriStr: String? = null
 
@@ -275,7 +277,12 @@ class Engine(val ctx: Context) {
                 } else if (kind == Kind.TORRENT) {
                     t.name = if (explicitName) t.name else "Torrent"
                     t.fileName = ""
-                    t.dir = File(catDir(cat), "Torrent_" + System.currentTimeMillis()).absolutePath
+                    // la sonda de metadatos puede haber preparado ya la carpeta
+                    // y el handle pausado en la sesión (selección de archivos):
+                    // se respeta "tdir" para que el torrent caiga donde sondeó
+                    val tdir = t.extra().optString("tdir", "")
+                    t.dir = if (tdir.isNotEmpty()) tdir
+                    else File(catDir(cat), "Torrent_" + System.currentTimeMillis()).absolutePath
                 } else if (kind == Kind.HLS) {
                     val fn = t.fileName
                     if (fn.endsWith(".m3u8", true)) t.fileName = fn.substring(0, fn.length - 5) + ".ts"
@@ -571,6 +578,25 @@ class Engine(val ctx: Context) {
                     if (t.live) {
                         t.saveSegs()
                         db.update(t)
+                    }
+                }
+            }
+            // guarda de espacio libre: con el disco casi lleno las descargas
+            // terminan en error y dejan archivos truncados; mejor pausar la
+            // cola y avisar con tiempo. Se consulta cada 8 s y el aviso se
+            // repite como mucho una vez por minuto.
+            if (now - lastSpaceCheck > 8000) {
+                lastSpaceCheck = now
+                if (running > 0 || queued > 0) {
+                    val free = try {
+                        android.os.StatFs(baseDir.absolutePath).availableBytes
+                    } catch (e: Exception) { -1L }
+                    val minFree = sp.getInt("minFreeMb", 150) * 1024L * 1024L
+                    if (free >= 0 && free < minFree && now - lastSpaceTold > 60000) {
+                        lastSpaceTold = now
+                        pauseAll()
+                        toast("Espacio insuficiente (${Kit.fmtBytes(free)} libres): " +
+                                "descargas pausadas. Libera espacio y pulsa «Todo».")
                     }
                 }
             }

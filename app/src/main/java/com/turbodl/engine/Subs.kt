@@ -45,15 +45,64 @@ object Subs {
                 doc = store.ensureDir(doc, engine.catNameOf(task.dir))
                 val fUri = store.ensureFile(doc, outName, "text/vtt")
                 store.openSink(fUri).use { it.append(data, data.size) }
+                // gemelo .srt: VLC y casi todos los reproductores externos
+                // cargan automáticamente el subtítulo que se llama igual
+                val srt = vttToSrt(text)
+                if (srt.isNotBlank()) {
+                    val sData = srt.toByteArray(Charsets.UTF_8)
+                    val sUri = store.ensureFile(doc, "$base.srt", "application/x-subrip")
+                    store.openSink(sUri).use { it.append(sData, sData.size) }
+                }
             } else {
                 val f = File(File(task.dir), outName)
                 if (f.exists()) f.delete()
                 f.writeBytes(data)
+                // gemelo .srt junto al vídeo (mismo nombre base)
+                val srt = vttToSrt(text)
+                if (srt.isNotBlank()) {
+                    val fs = File(File(task.dir), "$base.srt")
+                    if (fs.exists()) fs.delete()
+                    fs.writeText(srt, Charsets.UTF_8)
+                }
             }
-            "subtítulos guardados: $outName"
+            "subtítulos guardados: $outName (+.srt)"
         } catch (e: Exception) {
             "subtítulos no disponibles: ${e.message}"
         }
+    }
+
+    /**
+     * Convierte WebVTT a SubRip: los reproductores externos cargan .srt de
+     * forma casi universal y el .vtt no siempre. Normaliza las marcas
+     * HH:MM:SS.mmm -> HH:MM:SS,mmm (o MM:SS.mmm -> 00:MM:SS,mmm) y numera
+     * los cues. Función pura, cubierta por pruebas JVM.
+     */
+    fun vttToSrt(vtt: String): String {
+        val tsRe = Regex("((?:\\d{2}:)?\\d{2}:\\d{2}\\.\\d{3})\\s*-->\\s*((?:\\d{2}:)?\\d{2}:\\d{2}\\.\\d{3}).*")
+        fun normTs(t: String): String {
+            var s = t.trim()
+            if (s.split(":").size == 2) s = "00:$s"
+            return s.replace('.', ',')
+        }
+        val out = StringBuilder()
+        val lines = vtt.lines()
+        var i = 0
+        var n = 0
+        while (i < lines.size) {
+            val m = tsRe.find(lines[i])
+            if (m == null) { i++; continue }
+            n++
+            out.append(n).append('\n')
+            out.append(normTs(m.groupValues[1])).append(" --> ").append(normTs(m.groupValues[2])).append('\n')
+            i++
+            while (i < lines.size && lines[i].trim().isNotEmpty()) {
+                out.append(lines[i]).append('\n')
+                i++
+            }
+            out.append('\n')
+        }
+        val res = out.toString().trimEnd('\n')
+        return if (res.isEmpty()) "" else "$res\n"
     }
 
     /** GET de texto con las cabeceras de la tarea (UA, Referer, Cookie...). */

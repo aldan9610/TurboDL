@@ -21,17 +21,47 @@ class MiniFileProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
-    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+    /**
+     * Resuelve la ruta real de un URI. Además de las descargas
+     * (getExternalFilesDir/TurboDL) la 3.8.x sirve dos raíces internas:
+     *  - "install/<apk>" -> cacheDir/install (APK de la auto-actualización)
+     *  - "logs/<archivo>" -> filesDir/logs (registro de fallos compartible)
+     */
+    private fun resolve(uri: Uri): File {
         val rel = Uri.decode(uri.path ?: "").removePrefix("/")
-        val base = root().canonicalPath
-        val f = File(base, rel).canonicalFile
-        if (!f.path.startsWith(base)) throw SecurityException("ruta fuera de alcance")
+        return when {
+            rel.startsWith("install/") -> {
+                val base = File(App.app.cacheDir, "install").canonicalPath
+                val f = File(base, rel.removePrefix("install/")).canonicalFile
+                if (!f.path.startsWith(base)) throw SecurityException("ruta fuera de alcance")
+                f
+            }
+            rel.startsWith("logs/") -> {
+                val base = File(App.app.filesDir, "logs").canonicalPath
+                val f = File(base, rel.removePrefix("logs/")).canonicalFile
+                if (!f.path.startsWith(base)) throw SecurityException("ruta fuera de alcance")
+                f
+            }
+            else -> {
+                val base = root().canonicalPath
+                val f = File(base, rel).canonicalFile
+                if (!f.path.startsWith(base)) throw SecurityException("ruta fuera de alcance")
+                f
+            }
+        }
+    }
+
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+        val f = resolve(uri)
         if (!f.exists()) throw java.io.FileNotFoundException(f.path)
         return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
     override fun getType(uri: Uri): String {
-        val ext = MimeTypeMap.getFileExtensionFromUrl(uri.toString()).lowercase()
+        val name = resolve(uri).name
+        if (name.endsWith(".apk")) return "application/vnd.android.package-archive"
+        if (name.endsWith(".log") || name.endsWith(".txt")) return "text/plain"
+        val ext = MimeTypeMap.getFileExtensionFromUrl(name).lowercase()
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
     }
 
@@ -39,8 +69,7 @@ class MiniFileProvider : ContentProvider() {
         uri: Uri, projection: Array<String>?, selection: String?,
         selectionArgs: Array<String>?, sortOrder: String?
     ): Cursor {
-        val rel = Uri.decode(uri.path ?: "").removePrefix("/")
-        val f = File(root(), rel)
+        val f = resolve(uri)
         val c = MatrixCursor(arrayOf("_display_name", "_size", "_content_size"))
         c.addRow(arrayOf(f.name, f.length(), f.length()))
         return c

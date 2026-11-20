@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#FF6D00</item>
+        <item name="android:colorPrimaryDark">#E65100</item>
+        <item name="android:colorAccent">#FF6D00</item>
+        <item name="android:windowBackground">#FAFAFA</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+
+    <style name="AppThemeDark" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#FF8F00</item>
+        <item name="android:colorPrimaryDark">#BF360C</item>
+        <item name="android:colorAccent">#FFB300</item>
+        <item name="android:windowBackground">#121212</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+
+    <!-- AMOLED: negro puro, ahorra bateria en pantallas OLED -->
+    <style name="AppThemeAmoled" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">#FF8F00</item>
+        <item name="android:colorPrimaryDark">#000000</item>
+        <item name="android:colorAccent">#FFB300</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+</resources>
