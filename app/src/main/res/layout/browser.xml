@@ -5,7 +5,10 @@
     android:background="#FFFFFF"
     android:orientation="vertical">
 
-    <!-- ============ barra superior: escudo/lupa + dirección + recargar ============ -->
+    <!-- ============ barra superior: escudo/lupa + dirección + X + recargar ============
+         La barra superior es el ancla del modo búsqueda (4.0): el texto
+         tecleado en el buscador central vive SIEMPRE aquí, nunca lo tapa
+         el teclado (windowSoftInputMode=adjustResize en el manifest). -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
@@ -36,17 +39,22 @@
             android:imeOptions="actionGo"
             android:inputType="textUri"
             android:paddingLeft="6dp"
-            android:paddingRight="6dp"
+            android:paddingRight="2dp"
             android:singleLine="true"
             android:textColor="#212121"
             android:textColorHint="#9E9E9E"
             android:textSize="15sp" />
 
+        <!-- botón X de limpieza: aparece en cuanto hay algo escrito -->
         <Button
-            android:id="@+id/btnGo"
+            android:id="@+id/btnClear"
             style="?android:attr/borderlessButtonStyle"
-            android:layout_width="0dp"
-            android:layout_height="0dp"
+            android:layout_width="36dp"
+            android:layout_height="match_parent"
+            android:contentDescription="Borrar la búsqueda actual"
+            android:text="&#10005;"
+            android:textColor="#8A8A8A"
+            android:textSize="14sp"
             android:visibility="gone" />
 
         <Button
@@ -103,7 +111,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- ============ página de inicio (estilo navegador 4.0) ============ -->
+        <!-- ============ página de inicio (estilo Via Browser 4.0) ============ -->
         <LinearLayout
             android:id="@+id/homeOverlay"
             android:layout_width="match_parent"
@@ -117,11 +125,11 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_horizontal"
                 android:orientation="vertical"
-                android:paddingTop="56dp">
+                android:paddingTop="34dp">
 
                 <ImageView
-                    android:layout_width="100dp"
-                    android:layout_height="100dp"
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
                     android:contentDescription="TurboDL"
                     android:src="@mipmap/ic_launcher" />
 
@@ -130,7 +138,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="50dp"
                     android:layout_marginLeft="28dp"
-                    android:layout_marginTop="36dp"
+                    android:layout_marginTop="22dp"
                     android:layout_marginRight="28dp"
                     android:background="@drawable/pill_bg"
                     android:hint="Buscar o escribir dirección"
@@ -144,25 +152,63 @@
                     android:textSize="15sp" />
             </LinearLayout>
 
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- título del panel de accesos activo + botón de edición -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
                 android:paddingLeft="18dp"
-                android:paddingTop="26dp"
+                android:paddingTop="14dp"
                 android:paddingBottom="2dp"
-                android:text="Accesos directos  (mantén pulsado para quitar)"
-                android:textColor="#8A8A8A"
-                android:textSize="11sp" />
+                android:paddingRight="8dp">
 
-            <GridView
-                android:id="@+id/gridSites"
+                <TextView
+                    android:id="@+id/txtSitesTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Sitios comunes"
+                    android:textColor="#8A8A8A"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnEditSites"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:contentDescription="Editar accesos directos"
+                    android:minWidth="0dp"
+                    android:paddingLeft="10dp"
+                    android:paddingRight="10dp"
+                    android:text="Editar"
+                    android:textColor="#5A5A5A"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- paneles de accesos: swipe horizontal entre páginas,
+                 scroll vertical interno cuando desbordan -->
+            <HorizontalScrollView
+                android:id="@+id/sitesPager"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1"
-                android:horizontalSpacing="6dp"
-                android:numColumns="4"
-                android:padding="8dp"
-                android:verticalSpacing="6dp" />
+                android:fillViewport="true"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/sitesPages"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
+            <LinearLayout
+                android:id="@+id/sitesDots"
+                android:layout_width="match_parent"
+                android:layout_height="20dp"
+                android:gravity="center"
+                android:orientation="horizontal" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -192,7 +238,8 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- ============ sugerencias al escribir (marcadores/historial) ============ -->
+        <!-- ============ sugerencias al escribir (marcadores/historial) ============
+             Lista desplazable hasta el final (4.0): nunca más sin scroll -->
         <LinearLayout
             android:id="@+id/suggestionsHost"
             android:layout_width="match_parent"
@@ -201,6 +248,34 @@
             android:elevation="8dp"
             android:orientation="vertical"
             android:paddingBottom="8dp"
+            android:visibility="gone">
+
+            <ListView
+                android:id="@+id/suggestionsList"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:divider="#EEEEEE"
+                android:dividerHeight="1dp"
+                android:scrollbars="vertical" />
+        </LinearLayout>
+
+        <!-- ============ FAB de descargas detectadas (4.0) ============
+             Aparece en cuanto se detecta un elemento descargable en la
+             pestaña activa; muestra el contador en tiempo real. -->
+        <Button
+            android:id="@+id/btnDetectFab"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="16dp"
+            android:background="@drawable/fab_bg"
+            android:elevation="8dp"
+            android:minWidth="0dp"
+            android:paddingLeft="18dp"
+            android:paddingRight="18dp"
+            android:text="&#9654; 0"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
             android:visibility="gone" />
     </FrameLayout>
 
@@ -232,65 +307,67 @@
             android:textSize="20sp" />
     </LinearLayout>
 
-    <!-- ============ hoja inferior: menú (cuadrícula paginada) ============ -->
-    <ScrollView
+    <!-- ============ hoja inferior: menú con PÁGINAS DESLIZABLES (4.0) ============
+         El swipe izquierda/derecha cambia de página de opciones; los puntos
+         de abajo reflejan (y permiten saltar a) la página activa. -->
+    <LinearLayout
         android:id="@+id/menuSheet"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@drawable/sheet_bg"
         android:elevation="12dp"
-        android:scrollbars="none"
+        android:orientation="vertical"
+        android:paddingTop="8dp"
         android:visibility="gone">
+
+        <HorizontalScrollView
+            android:id="@+id/menuPager"
+            android:layout_width="match_parent"
+            android:layout_height="190dp"
+            android:fillViewport="true"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/menuPages"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal" />
+        </HorizontalScrollView>
+
+        <LinearLayout
+            android:id="@+id/menuDots"
+            android:layout_width="match_parent"
+            android:layout_height="22dp"
+            android:gravity="center"
+            android:orientation="horizontal" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:paddingTop="14dp">
+            android:gravity="end|center_vertical"
+            android:orientation="horizontal">
 
-            <GridLayout
-                android:id="@+id/menuGrid"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:columnCount="5"
-                android:paddingLeft="6dp"
-                android:paddingRight="6dp" />
+            <Button
+                android:id="@+id/btnMenuExit"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="52dp"
+                android:layout_height="44dp"
+                android:contentDescription="Salir de TurboDL"
+                android:text="&#128268;"
+                android:textColor="#212121"
+                android:textSize="16sp" />
 
-            <LinearLayout
-                android:id="@+id/menuDots"
-                android:layout_width="match_parent"
-                android:layout_height="22dp"
-                android:gravity="center"
-                android:orientation="horizontal" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="end|center_vertical"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/btnMenuExit"
-                    style="?android:attr/borderlessButtonStyle"
-                    android:layout_width="52dp"
-                    android:layout_height="44dp"
-                    android:contentDescription="Salir de TurboDL"
-                    android:text="&#128268;"
-                    android:textColor="#212121"
-                    android:textSize="16sp" />
-
-                <Button
-                    android:id="@+id/btnMenuCollapse"
-                    style="?android:attr/borderlessButtonStyle"
-                    android:layout_width="52dp"
-                    android:layout_height="44dp"
-                    android:contentDescription="Cerrar el menú"
-                    android:text="&#8964;"
-                    android:textColor="#212121"
-                    android:textSize="16sp" />
-            </LinearLayout>
+            <Button
+                android:id="@+id/btnMenuCollapse"
+                style="?android:attr/borderlessButtonStyle"
+                android:layout_width="52dp"
+                android:layout_height="44dp"
+                android:contentDescription="Cerrar el menú"
+                android:text="&#8964;"
+                android:textColor="#212121"
+                android:textSize="16sp" />
         </LinearLayout>
-    </ScrollView>
+    </LinearLayout>
 
     <!-- ============ barra inferior de navegación (estilo 4.0) ============ -->
     <LinearLayout

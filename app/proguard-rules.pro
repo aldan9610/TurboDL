@@ -44,3 +44,7 @@
 -dontwarn javax.xml.**
 
 # (el motor de bloqueo es 100% Kotlin desde la 3.6.0: sin JNI, sin keeps)
+
+# --- jsoup (exportacion Markdown, vendido en app/libs) ---
+-keep class org.jsoup.** { *; }
+-dontwarn org.jsoup.**

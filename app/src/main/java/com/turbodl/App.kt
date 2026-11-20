@@ -9,6 +9,10 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         app = this
+        // sandbox de usuarios (4.0): el sufijo del directorio de datos del
+        // WebView se fija ANTES de crear cualquier WebView; el usuario
+        // "main" no usa sufijo (comportamiento clásico sin cambios)
+        com.turbodl.util.Users.applyDataDirSuffix(this)
         // registro local de fallos (sin telemetría): lo primero, para no
         // perder ni el crash que ocurra durante el arranque
         com.turbodl.util.CrashLog.install(this)

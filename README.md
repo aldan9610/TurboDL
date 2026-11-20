@@ -1,10 +1,96 @@
-# TurboDL 3.7.0
+# TurboDL 4.0.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.0.0 — navegador estilo Via Browser: interfaz nueva, credenciales, usuarios y exportación
+
+La interfaz del navegador integrado se reconstruye siguiendo el patrón de
+Via Browser: barra superior persistente, menú de hoja inferior con páginas
+deslizables, sugerencias desplazables, estados con color de acento e
+iconografía real. Sobre esa base, la 4.0 corrige los diez defectos de la
+línea 4.0 perdida y añade seis funcionalidades nuevas.
+
+### 🔎 Búsqueda: nunca más el teclado encima
+- **U1 · Texto siempre visible**: al tocar el buscador central de la página
+  de inicio, el texto pasa a la **barra superior** (el campo nunca queda
+  tapado por el teclado; `windowSoftInputMode=adjustResize`).
+- **U2 · Botón X de limpieza**: aparece en cuanto hay algo escrito y borra
+  sin cerrar el teclado ni perder el foco.
+- **U10 · Sugerencias desplazables**: el panel de marcadores/historial es
+  una lista con scroll hasta el último resultado (tope de altura 420dp).
+
+### 🗂 Menú y accesos: todo con swipe
+- **U3 · Menú de 3 páginas deslizables**: swipe izquierda/derecha entre
+  Navegación · Herramientas · Privacidad; los puntos reflejan la página
+  activa y permiten saltar. Los elementos activos se pintan en acento.
+- **U9 · Tres paneles de accesos con swipe**: Sitios comunes (12),
+  Inteligencia artificial (Z.ai, ChatGPT, DeepSeek, Gemini, Claude,
+  Perplexity, Copilot, Qwen, Hugging Face, Grok) y Mis sitios.
+- **U7 · Iconos reales**: favicon real por sitio (servicio público de
+  favicons + caché en disco) y monograma por dominio como fallback;
+  adiós al icono genérico repetido.
+- **U8 · Dos vistas de accesos**: lectura (abrir) y **modo edición
+  explícito** con ✕ por celda y **reordenado por arrastrar y soltar**
+  (drag & drop nativo); menú contextual con pulsación larga (abrir en
+  pestaña nueva, renombrar, mover al inicio, eliminar con confirmación).
+
+### 🧭 Navegación consistente
+- **U4 · Botón atrás con máquina de estados única**: sugerencias → hojas →
+  inicio ↔ web → salida con confirmación de doble pulsación.
+- **U5 · FAB de descargas detectadas**: botón flotante con contador en
+  tiempo real (medios olfateados + descargas directas del DownloadListener);
+  al pulsarlo se elige qué descargar con selección múltiple.
+- **U6 · Interfaz reactiva**: bloqueador, escritorio, lector y nocturno
+  cambian de color/estado al instante en el menú y en la barra.
+
+### 🔐 Credenciales (nuevo)
+Al enviar un formulario de inicio de sesión, TurboDL ofrece guardar el
+usuario y la contraseña. Se cifran con **AES-256-GCM y la clave del
+AndroidKeyStore** (nunca en texto claro), son **por usuario** y se
+**rellenan automáticamente** en las siguientes visitas al mismo dominio.
+Gestión y borrado desde el menú (Privacidad → Credenciales), con opción
+«Nunca en este sitio».
+
+### 👥 Usuarios sandbox (nuevo, estilo lfbrowser)
+Multiperfil real: cada usuario tiene **cookies, sesiones, credenciales,
+historial, marcadores y accesos propios** (sandbox por
+`WebView.setDataDirectorySuffix` montada al arrancar el proceso). Al
+cambiar de usuario la aplicación se reinicia y **el servidor solo detecta
+a ese usuario**. Selector y creación desde el menú (Privacidad → Usuarios).
+
+### 📤 Exportar y guardar offline (nuevo)
+- **PDF** por dos vías: impresión del sistema (documento vectorial) o
+  captura rápida del render a PDF paginado A4.
+- **Markdown** (.md): extrae el contenido principal (nav/scripts fuera),
+  convierte encabezados, listas, tablas, código y enlaces con URLs
+  absolutas — listo para pegar como contexto en LLMs. Conversión con
+  jsoup (vendido en `app/libs`).
+- **HTML completo, texto plano y PNG** de página completa.
+- **Guardar offline (.mht)**: página tal cual en línea con CSS+JS incluidos;
+  se abre sin conexión desde «Páginas guardadas» (guardar, listar, abrir,
+  eliminar).
+
+### 🗒 Notas (nuevo)
+Notas con CRUD completo dentro del navegador: crear, editar, buscar,
+eliminar, compartir y **copiar al portapapeles con un toque** — el flujo
+escribir prompt → copiar → pegar en el chatbot, sin salir de TurboDL.
+
+### 🧪 Herramientas de desarrollador (nuevo)
+En el menú (Herramientas): **HTML en bruto** del DOM vivo (visor + guardar
+.html), **registro de red** de todas las peticiones (activable por sesión)
+y **consola de JavaScript** estilo DevTools con niveles por color, captura
+de `window.onerror` y evaluación de expresiones en la página activa.
+
+### 🔧 Internas
+- Base de datos migrada a **v3** (historial por usuario + tabla de
+  credenciales); `NotesDb` nueva para notas y páginas guardadas.
+- media3/ExoPlayer resuelto por Gradle; wrapper de Gradle regenerado
+  (el del snapshot rescatado estaba corrupto).
+- versionCode 14, versionName 4.0.0.
 
 ## Novedades de la 3.7.0 — escudo de bloqueos y anti-redirecciones
 

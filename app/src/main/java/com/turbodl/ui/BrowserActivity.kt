@@ -51,7 +51,9 @@ import com.turbodl.engine.AdBlockEngine
 import com.turbodl.engine.MediaProbe
 import com.turbodl.model.Kind
 import com.turbodl.util.Kit
+import com.turbodl.util.Favicons
 import com.turbodl.util.Profiles
+import com.turbodl.util.Users
 import com.turbodl.util.Ui
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,7 +70,6 @@ class BrowserActivity : Activity() {
     private lateinit var tabsRow: LinearLayout
     private lateinit var prog: ProgressBar
     private lateinit var homeOverlay: LinearLayout
-    private lateinit var grid: GridView
     private lateinit var webHost: FrameLayout
     private lateinit var stripScroll: HorizontalScrollView
     private lateinit var strip: LinearLayout
@@ -199,7 +200,8 @@ class BrowserActivity : Activity() {
         })();
         """.trimIndent()
 
-        private val DEFAULT_SITES = arrayOf(
+        /** Panel 1: sitios comunes (catálogo inicial, reordenable/eximible). */
+        private val COMMON_SITES = arrayOf(
             "YouTube|https://m.youtube.com",
             "Facebook|https://m.facebook.com",
             "Instagram|https://www.instagram.com",
@@ -208,8 +210,64 @@ class BrowserActivity : Activity() {
             "Reddit|https://www.reddit.com",
             "Wikipedia|https://es.wikipedia.org",
             "WhatsApp Web|https://web.whatsapp.com",
-            "Google|https://www.google.com"
+            "Google|https://www.google.com",
+            "Gmail|https://mail.google.com",
+            "Maps|https://maps.google.com",
+            "Amazon|https://www.amazon.com"
         )
+
+        /** Panel 2: inteligencia artificial (chats para prompts y notas). */
+        private val AI_SITES = arrayOf(
+            "Z.ai|https://chat.z.ai",
+            "ChatGPT|https://chatgpt.com",
+            "DeepSeek|https://chat.deepseek.com",
+            "Gemini|https://gemini.google.com",
+            "Claude|https://claude.ai",
+            "Perplexity|https://www.perplexity.ai",
+            "Copilot|https://copilot.microsoft.com",
+            "Qwen|https://chat.qwen.ai",
+            "Hugging Face|https://huggingface.co/chat",
+            "Grok|https://grok.com"
+        )
+
+        /** Compatibilidad: catálogo antiguo (migración de «Mis sitios»). */
+        private val DEFAULT_SITES = COMMON_SITES
+
+        /** Detecta formularios de inicio de sesión y captura el envío (4.0). */
+        private val CREDS_JS = """
+        (function(){
+          if (window.__tdlCreds) return; window.__tdlCreds = 1;
+          function forms(){ return Array.prototype.slice.call(document.querySelectorAll('form')).filter(function(f){ return f.querySelector('input[type=password]'); }); }
+          function hook(f){
+            if (f.__tdlHooked) return; f.__tdlHooked = 1;
+            f.addEventListener('submit', function(){
+              try {
+                var p = f.querySelector('input[type=password]');
+                var u = f.querySelector('input[type=text],input[type=email],input[name*=user i],input[name*=mail i],input[name*=login i],input[id*=user i],input[id*=mail i]');
+                if (p && p.value && u && u.value && window.__tdlBridge)
+                  window.__tdlBridge.saveCreds(location.hostname, u.value, p.value);
+              } catch(e){}
+            }, true);
+          }
+          forms().forEach(hook);
+          try {
+            new MutationObserver(function(){ forms().forEach(hook); })
+              .observe(document.documentElement, {childList:true, subtree:true});
+          } catch(e){}
+        })();
+        """.trimIndent()
+
+        /** Reenvía errores JS no capturados a la consola interna (4.0). */
+        private val ONERROR_JS = """
+        (function(){
+          if (window.__tdlErr) return; window.__tdlErr = 1;
+          window.onerror = function(msg, src, line){
+            try { if (window.__tdlBridge)
+              window.__tdlBridge.logConsole('error', msg + ' @ ' + (src||'') + ':' + (line||0));
+            } catch(e){}
+          };
+        })();
+        """.trimIndent()
 
         /** Gancho JS: intercepta XHR/fetch/<video>/<audio>/atributos src */
         val HOOK = """
@@ -304,12 +362,25 @@ class BrowserActivity : Activity() {
     // hojas inferiores y sugerencias (interfaz 4.0, estilo navegador mínimo)
     private lateinit var homeSearch: android.widget.EditText
     private lateinit var suggestionsHost: LinearLayout
+    private lateinit var suggestionsList: android.widget.ListView
     private lateinit var tabSheet: LinearLayout
     private lateinit var tabListHost: LinearLayout
     private lateinit var menuSheet: android.view.View
-    private lateinit var menuGrid: android.widget.GridLayout
+    private lateinit var menuPager: HorizontalScrollView
+    private lateinit var menuPages: LinearLayout
     private lateinit var menuDots: LinearLayout
     private var menuPage = 0
+    // paneles de accesos (4.0): swipe entre Sitios comunes / IA / Mis sitios
+    private lateinit var sitesPager: HorizontalScrollView
+    private lateinit var sitesPages: LinearLayout
+    private lateinit var sitesDots: LinearLayout
+    private lateinit var txtSitesTitle: TextView
+    private lateinit var btnEditSites: Button
+    private lateinit var fab: Button
+    private var sitesPage = 0
+    private var editSites = false
+    // descargas directas detectadas por el DownloadListener (además del sniffing)
+    private val downloadEvents = LinkedHashMap<String, Long>()
     @Volatile private var suppressSuggest = false
     // fusible anti-sobre-bloqueo del motor (cuenta por carga de página) y
     // aviso de red caída (para no confundir "sin conexión" con un fallo de la app)
@@ -328,6 +399,70 @@ class BrowserActivity : Activity() {
         fun sniff(url: String, type: String, title: String) {
             runOnUiThread { addDetected(url, type, title, tabUid) }
         }
+
+        @JavascriptInterface
+        fun saveCreds(host: String, user: String, pass: String) {
+            runOnUiThread { offerCredSave(host, user, pass) }
+        }
+
+        @JavascriptInterface
+        fun logConsole(level: String, msg: String) {
+            com.turbodl.util.DevLog.logCon(level.ifEmpty { "log" }, msg)
+        }
+    }
+
+    /** Diálogo «¿Guardar inicio de sesión?» (4.0, estilo navegador). */
+    private fun offerCredSave(host: String, user: String, pass: String) {
+        if (host.isEmpty() || user.isEmpty() || pass.isEmpty()) return
+        val uid = Users.active(this)
+        val hostBase = baseOf(host)
+        if (hostBase.isEmpty() || eng.db.neverFor(uid, hostBase)) return
+        AlertDialog.Builder(this)
+            .setTitle("¿Guardar inicio de sesión?")
+            .setMessage("$hostBase\n\nUsuario: $user\n\nLas credenciales se cifran con la clave segura del dispositivo (AES-256-GCM, AndroidKeyStore) y solo las usa el usuario activo.")
+            .setPositiveButton("Guardar") { _, _ ->
+                eng.db.saveCred(uid, hostBase, user,
+                    com.turbodl.util.Secrets.encrypt(pass))
+                toast("Credenciales guardadas para $hostBase")
+            }
+            .setNeutralButton("Nunca en este sitio") { _, _ ->
+                eng.db.setNeverCred(uid, hostBase)
+                toast("No se volverá a preguntar en $hostBase")
+            }
+            .setNegativeButton("No", null)
+            .show()
+    }
+
+    /** Autorrelleno de credenciales guardadas para el host de la página. */
+    private fun maybeAutofill(view: WebView?, url: String) {
+        val uid = Users.active(this)
+        val host = baseOf(hostOf(url))
+        if (host.isEmpty() || view == null) return
+        try {
+            if (eng.db.neverFor(uid, host)) return
+            val c = eng.db.findCred(uid, host) ?: return
+            val pass = com.turbodl.util.Secrets.decrypt(c.secret) ?: return
+            if (c.username.isEmpty()) return
+            injectOn(view, fillCredsJs(c.username, pass))
+            toast("TurboDL rellenó tus credenciales guardadas")
+        } catch (e: Exception) { }
+    }
+
+    private fun fillCredsJs(username: String, pass: String): String {
+        val u = org.json.JSONObject.quote(username)
+        val p = org.json.JSONObject.quote(pass)
+        return "(function(){try{" +
+            "var U=$u, P=$p;" +
+            "var f=null;var fs=document.querySelectorAll('form');" +
+            "for (var i=0;i<fs.length;i++){if(fs[i].querySelector('input[type=password]')){f=fs[i];break;}}" +
+            "if(!f)return;" +
+            "var pw=f.querySelector('input[type=password]');" +
+            "var us=f.querySelector('input[type=text],input[type=email],input[name*=user i],input[name*=mail i],input[name*=login i],input[id*=user i],input[id*=mail i]');" +
+            "function sv(el,v){if(!el)return;el.value=v;" +
+            "el.dispatchEvent(new Event('input',{bubbles:true}));" +
+            "el.dispatchEvent(new Event('change',{bubbles:true}));}" +
+            "sv(us,U);sv(pw,P);" +
+            "}catch(e){}})();"
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -344,8 +479,13 @@ class BrowserActivity : Activity() {
         tabsRow = findViewById(R.id.tabsRow)
         prog = findViewById(R.id.webProg)
         homeOverlay = findViewById(R.id.homeOverlay)
-        grid = findViewById(R.id.gridSites)
         webHost = findViewById(R.id.webHost)
+        sitesPager = findViewById(R.id.sitesPager)
+        sitesPages = findViewById(R.id.sitesPages)
+        sitesDots = findViewById(R.id.sitesDots)
+        txtSitesTitle = findViewById(R.id.txtSitesTitle)
+        btnEditSites = findViewById(R.id.btnEditSites)
+        fab = findViewById(R.id.btnDetectFab)
         stripScroll = findViewById(R.id.tabsStripScroll)
         strip = findViewById(R.id.tabsStrip)
 
@@ -361,7 +501,6 @@ class BrowserActivity : Activity() {
 
         findViewById<Button>(R.id.btnBack).setOnClickListener { if (web.canGoBack()) web.goBack() }
         findViewById<Button>(R.id.btnFwd).setOnClickListener { if (web.canGoForward()) web.goForward() }
-        findViewById<Button>(R.id.btnGo).setOnClickListener { go() }
         findViewById<Button>(R.id.btnShield).setOnClickListener { showBlockedDialog() }
         findViewById<Button>(R.id.btnReload).setOnClickListener {
             if (prog.visibility == View.VISIBLE) {
@@ -378,9 +517,19 @@ class BrowserActivity : Activity() {
         findViewById<Button>(R.id.btnMore).setOnClickListener { showMenuSheet() }
         findViewById<Button>(R.id.btnAddSite).setOnClickListener { addSiteDialog() }
         findViewById<Button>(R.id.btnResetSites).setOnClickListener {
-            saveSites(DEFAULT_SITES.toList())
-            refreshSites()
-            toast("Accesos restaurados")
+            AlertDialog.Builder(this)
+                .setTitle("Restaurar accesos")
+                .setMessage("Vuelven a su estado inicial los tres paneles (Sitios comunes, Inteligencia artificial y Mis sitios). ¿Continuar?")
+                .setPositiveButton("Restaurar") { _, _ ->
+                    val u = Users.active(this)
+                    eng.sp.edit()
+                        .remove("sitesP0_$u").remove("sitesP1_$u")
+                        .remove("sitesP2_$u").putString("sites", "[]").apply()
+                    buildSitesPanels()
+                    toast("Accesos restaurados")
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
         }
 
         editUrl.setOnEditorActionListener { _, _, _ -> go(); true }
@@ -389,6 +538,9 @@ class BrowserActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
             override fun afterTextChanged(s: android.text.Editable?) {
                 showSuggestions(s?.toString() ?: "")
+                // 4.0 U2: la X de limpieza apenas hay algo escrito
+                findViewById<Button>(R.id.btnClear).visibility =
+                    if ((s?.length ?: 0) > 0) View.VISIBLE else View.GONE
             }
         })
         setupHistoryBar()
@@ -405,15 +557,65 @@ class BrowserActivity : Activity() {
             }
             true
         }
+        // 4.0 U1: al tocar el buscador central, el texto pasa a la barra
+        // superior (siempre visible sobre el teclado, nunca tapada)
+        homeSearch.setOnFocusChangeListener { _, has ->
+            if (has) {
+                editUrl.setText(homeSearch.text.toString())
+                editUrl.requestFocus()
+                editUrl.setSelection(editUrl.text.length)
+                showKb()
+            }
+        }
         // hojas inferiores: pestañas y menú
         tabSheet = findViewById(R.id.tabSheet)
         tabListHost = findViewById(R.id.tabListHost)
         menuSheet = findViewById(R.id.menuSheet)
-        menuGrid = findViewById(R.id.menuGrid)
+        menuPager = findViewById(R.id.menuPager)
+        menuPages = findViewById(R.id.menuPages)
         menuDots = findViewById(R.id.menuDots)
         suggestionsHost = findViewById(R.id.suggestionsHost)
+        suggestionsList = findViewById(R.id.suggestionsList)
         findViewById<Button>(R.id.btnMenuCollapse).setOnClickListener { hideSheets() }
         findViewById<Button>(R.id.btnMenuExit).setOnClickListener { finishAffinity() }
+        // 4.0 U2: X de limpieza — aparece con texto, borra sin cerrar el teclado
+        findViewById<Button>(R.id.btnClear).setOnClickListener {
+            suppressSuggest = true
+            editUrl.setText("")
+            suppressSuggest = false
+            editUrl.requestFocus()
+            showKb()
+        }
+        // 4.0 U8: modo edición explícito de accesos (arrastrar/eliminar)
+        btnEditSites.setOnClickListener {
+            editSites = !editSites
+            buildSitesPanels()
+            updateSitesTitle()
+            toast(if (editSites)
+                "Modo edición: mantén pulsado y arrastra para reordenar, ✕ para quitar"
+            else "Modo lectura")
+        }
+        // 4.0 U5: FAB de descargas detectadas con contador en tiempo real
+        fab.setOnClickListener { showDetectChooser() }
+        // 4.0 U9: título del panel activo al deslizar los accesos
+        sitesPager.setOnScrollChangeListener { _, sx, _, _, _ ->
+            val w = sitesPager.width.coerceAtLeast(1)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0, 2)
+            if (np != sitesPage) {
+                sitesPage = np
+                renderSitesDots()
+                updateSitesTitle()
+            }
+        }
+        // 4.0 U3: página activa del menú al deslizar
+        menuPager.setOnScrollChangeListener { _, sx, _, _, _ ->
+            val w = menuPager.width.coerceAtLeast(1)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0, 2)
+            if (np != menuPage) {
+                menuPage = np
+                renderMenuDots()
+            }
+        }
 
         readerMode = eng.sp.getBoolean("readerMode", false)
         restoreTabs()
@@ -660,10 +862,11 @@ class BrowserActivity : Activity() {
     private fun addCurrentAsSite() {
         val u = web.url ?: return
         val name = try { Uri.parse(u).host ?: u } catch (e: Exception) { u }
-        val sites = loadSites().toMutableList()
-        sites.add("$name|$u")
-        saveSites(sites)
-        toast("Añadido a accesos")
+        val l = loadPanel(2)
+        if (l.any { it.substringAfter('|') == u }) { toast("Ya está en tus accesos"); return }
+        l.add("$name|$u")
+        savePanel(2, l)
+        toast("Añadido a «Mis sitios»")
     }
 
     // ---------------- navegacion ----------------
@@ -705,12 +908,13 @@ class BrowserActivity : Activity() {
         homeOverlay.visibility = if (show) View.VISIBLE else View.GONE
         if (cur in tabs.indices) tabs[cur].showHome = show
         if (show) {
-            refreshSites()
+            buildSitesPanels()
             hideSuggestions()
             hideSheets()
             hideKb()
         }
         updateShield()
+        updateDetectBtn()
     }
 
     private fun hideKb() {
@@ -720,30 +924,38 @@ class BrowserActivity : Activity() {
         } catch (e: Exception) { }
     }
 
-    // ---------------- historial de busqueda ----------------
+    private fun showKb() {
+        try {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(editUrl, InputMethodManager.SHOW_IMPLICIT)
+        } catch (e: Exception) { }
+    }
+
+    // ---------------- historial de busqueda (por usuario) ----------------
 
     private fun history(): MutableList<String> {
         val out = ArrayList<String>()
         try {
-            val arr = JSONArray(eng.sp.getString("history", "[]") ?: "[]")
+            val arr = JSONArray(eng.sp.getString("history_" + Users.active(this), "[]") ?: "[]")
             for (i in 0 until arr.length()) out.add(arr.getString(i))
         } catch (e: Exception) { }
         return out
     }
 
     private fun addToHistory(q: String) {
+        val key = "history_" + Users.active(this)
         val h = history()
         h.remove(q)
         h.add(0, q)
         while (h.size > 30) h.removeAt(h.size - 1)
         val arr = JSONArray()
         h.forEach { arr.put(it) }
-        eng.sp.edit().putString("history", arr.toString()).apply()
+        eng.sp.edit().putString(key, arr.toString()).apply()
         setupHistoryBar()
     }
 
     private fun clearHistory() {
-        eng.sp.edit().putString("history", "[]").apply()
+        eng.sp.edit().putString("history_" + Users.active(this), "[]").apply()
         setupHistoryBar()
     }
 
@@ -780,11 +992,20 @@ class BrowserActivity : Activity() {
         ws.loadWithOverviewMode = true
         ws.useWideViewPort = true
         ws.cacheMode = WebSettings.LOAD_DEFAULT
+        // 4.0: abrir páginas guardadas (.mht) desde el panel de guardadas
+        ws.allowFileAccess = true
+        ws.allowContentAccess = true
         Ui.applyUa(w, eng.sp, desktopMode)
         w.addJavascriptInterface(Bridge(t.uid), "__tdlBridge")
         w.webViewClient = client
         w.webChromeClient = chrome
         w.setDownloadListener { url, _, _, _, _ ->
+            // 4.0 U5: toda descarga directa entra en el contador del FAB
+            try {
+                if (downloadEvents.size > 50) downloadEvents.remove(downloadEvents.keys.first())
+                downloadEvents[url] = System.currentTimeMillis()
+            } catch (e: Exception) { }
+            updateDetectBtn()
             askDownload(url, null)
         }
         // pulsacion larga sobre un enlace: abrir en primera fila o en segundo plano
@@ -1394,7 +1615,7 @@ class BrowserActivity : Activity() {
     // ---------------- historial de paginas ----------------
 
     private fun showPageHistory() {
-        val rows = eng.db.history(200)
+        val rows = eng.db.history(200, Users.active(this))
         val lay = LinearLayout(this)
         lay.orientation = LinearLayout.VERTICAL
         val lv = ListView(this)
@@ -1457,58 +1678,254 @@ class BrowserActivity : Activity() {
         dlg.show()
     }
 
-    // ---------------- accesos directos ----------------
+    // ---------------- accesos directos: 3 paneles con swipe (4.0) ----------------
+    // Panel 0: sitios comunes · Panel 1: inteligencia artificial · Panel 2: mis sitios
+    // Cada panel reordena por arrastre en modo edición; los iconos son el
+    // favicon real del sitio (caché en disco) o un monograma por dominio.
 
-    private fun loadSites(): List<String> {
-        try {
-            val arr = JSONArray(eng.sp.getString("sites", "[]") ?: "[]")
-            if (arr.length() > 0) {
+    private val PANEL_TITLES = arrayOf("Sitios comunes", "Inteligencia artificial", "Mis sitios")
+
+    private fun panelKey(panel: Int): String = "sitesP${panel}_" + Users.active(this)
+
+    private fun loadPanel(panel: Int): MutableList<String> {
+        val saved = eng.sp.getString(panelKey(panel), null)
+        if (saved != null) {
+            try {
+                val arr = JSONArray(saved)
                 val out = ArrayList<String>()
                 for (i in 0 until arr.length()) out.add(arr.getString(i))
                 return out
-            }
-        } catch (e: Exception) { }
-        return DEFAULT_SITES.toList()
+            } catch (e: Exception) { }
+        }
+        return when (panel) {
+            0 -> COMMON_SITES.toMutableList()
+            1 -> AI_SITES.toMutableList()
+            else -> loadLegacySites()
+        }
     }
 
-    private fun saveSites(list: List<String>) {
+    /** Migración 4.0: la lista antigua de accesos pasa a «Mis sitios». */
+    private fun loadLegacySites(): MutableList<String> {
+        val out = ArrayList<String>()
+        try {
+            val arr = JSONArray(eng.sp.getString("sites", "[]") ?: "[]")
+            for (i in 0 until arr.length()) out.add(arr.getString(i))
+        } catch (e: Exception) { }
+        val esCatalogo = out == COMMON_SITES.toList() ||
+            out.map { it.substringAfter('|') } ==
+                DEFAULT_SITES.map { it.substringAfter('|') }
+        if (out.isNotEmpty() && !esCatalogo) {
+            savePanel(2, out)
+        }
+        eng.sp.edit().putString("sites", "[]").apply()
+        return if (out.isNotEmpty() && !esCatalogo) out else ArrayList()
+    }
+
+    private fun savePanel(panel: Int, list: List<String>) {
         val arr = JSONArray()
         list.forEach { arr.put(it) }
-        eng.sp.edit().putString("sites", arr.toString()).apply()
+        eng.sp.edit().putString(panelKey(panel), arr.toString()).apply()
     }
 
-    private fun refreshSites() {
-        val sites = loadSites()
-        val labels = sites.map { it.substringBefore('|') }
-        grid.adapter = object : BaseAdapter() {
-            override fun getCount(): Int = labels.size
-            override fun getItem(p: Int): String = labels[p]
+    private fun buildSitesPanels() {
+        sitesPages.removeAllViews()
+        for (p in 0 until 3) {
+            val page = LinearLayout(this)
+            page.orientation = LinearLayout.VERTICAL
+            val gv = GridView(this)
+            gv.numColumns = 4
+            gv.horizontalSpacing = dp(6)
+            gv.verticalSpacing = dp(6)
+            gv.setPadding(dp(8), dp(4), dp(8), dp(8))
+            gv.adapter = sitesAdapter(p)
+            page.addView(gv, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            // cada página ocupa el ancho visible del pager (swipe entre ellas)
+            sitesPages.addView(page, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            gv.setOnItemClickListener { _, _, pos, _ -> openSite(p, pos) }
+            gv.setOnItemLongClickListener { _, v, pos, _ ->
+                siteLongPress(p, pos, v); true
+            }
+            setupSiteDrag(gv, p)
+        }
+        renderSitesDots()
+        updateSitesTitle()
+    }
+
+    private fun sitesAdapter(panel: Int): BaseAdapter {
+        val items = loadPanel(panel)
+        return object : BaseAdapter() {
+            override fun getCount(): Int = items.size
+            override fun getItem(p: Int): String = items[p]
             override fun getItemId(p: Int): Long = p.toLong()
             override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
                 val v = cv ?: layoutInflater.inflate(R.layout.item_site, parent, false)
-                (v.findViewById<ImageView>(R.id.siteIcon)).setImageResource(R.mipmap.ic_launcher)
-                v.findViewById<TextView>(R.id.siteName).text = labels[p]
+                val name = items[p].substringBefore('|')
+                val url = items[p].substringAfter('|')
+                val host = hostOf(url)
+                val icon = v.findViewById<ImageView>(R.id.siteIcon)
+                // monograma inmediato + favicon real (memoria/disco/red)
+                icon.setImageBitmap(Favicons.cached(this@BrowserActivity, host)
+                    ?: Favicons.monogram(host, dp(40)))
+                if (host.isNotEmpty()) {
+                    Favicons.fetchAsync(this@BrowserActivity, host) { b ->
+                        if (b != null) runOnUiThread {
+                            try { icon.setImageBitmap(b) } catch (e: Exception) { }
+                        }
+                    }
+                }
+                v.findViewById<TextView>(R.id.siteName).text = name
+                // 4.0 U8: en modo edición cada celda muestra su ✕
+                v.findViewById<View>(R.id.siteDel).visibility =
+                    if (editSites) View.VISIBLE else View.GONE
+                v.findViewById<View>(R.id.siteDel).setOnClickListener {
+                    AlertDialog.Builder(this@BrowserActivity)
+                        .setTitle("Quitar «$name»")
+                        .setMessage(if (panel == 2) "¿Eliminar este acceso de «Mis sitios»?"
+                            else "¿Quitar «$name» del panel? Puedes recuperarlo con «Restaurar».")
+                        .setPositiveButton("Quitar") { _, _ -> removeSite(panel, p) }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                }
                 return v
             }
         }
-        Ui.styleAll(grid)
-        grid.setOnItemClickListener { _, _, p, _ ->
-            load(sites[p].substringAfter('|'))
+    }
+
+    private fun openSite(panel: Int, pos: Int) {
+        val items = loadPanel(panel)
+        if (pos >= items.size) return
+        if (editSites) {
+            toast("Modo edición: usa ✕ para quitar, o mantén pulsado y arrastra")
+            return
         }
-        grid.setOnItemLongClickListener { _, _, p, _ ->
-            AlertDialog.Builder(this)
-                .setTitle("Quitar «${labels[p]}»")
-                .setMessage("¿Eliminar este acceso directo de la lista?")
-                .setPositiveButton("Quitar") { _, _ ->
-                    val l = loadSites().toMutableList()
-                    l.removeAt(p)
-                    saveSites(l)
-                    refreshSites()
+        load(items[pos].substringAfter('|'))
+    }
+
+    /** Menú contextual de pulsación larga (4.0 U8): en lectura ofrece
+     *  abrir/renombrar/reordenar/eliminar; en edición inicia el arrastre. */
+    private fun siteLongPress(panel: Int, pos: Int, view: View) {
+        val items = loadPanel(panel)
+        if (pos >= items.size) return
+        if (editSites) {
+            startSiteDrag(pos, view)
+            return
+        }
+        val entry = items[pos]
+        val name = entry.substringBefore('|')
+        val url = entry.substringAfter('|')
+        val opts = arrayOf(
+            "🗂 Abrir en pestaña nueva",
+            "✏ Renombrar",
+            "⬆ Mover al inicio",
+            "🗑 Eliminar este acceso")
+        AlertDialog.Builder(this)
+            .setTitle(name)
+            .setItems(opts) { _, w ->
+                when (w) {
+                    0 -> newTab(url, true)
+                    1 -> renameSite(panel, pos)
+                    2 -> {
+                        items.removeAt(pos); items.add(0, entry)
+                        savePanel(panel, items); buildSitesPanels()
+                    }
+                    3 -> AlertDialog.Builder(this)
+                        .setTitle("Eliminar «$name»")
+                        .setPositiveButton("Eliminar") { _, _ -> removeSite(panel, pos) }
+                        .setNegativeButton("Cancelar", null).show()
                 }
-                .setNegativeButton("Cancelar", null)
-                .show()
-            true
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun renameSite(panel: Int, pos: Int) {
+        val items = loadPanel(panel)
+        if (pos >= items.size) return
+        val e = android.widget.EditText(this)
+        e.setText(items[pos].substringBefore('|'))
+        AlertDialog.Builder(this)
+            .setTitle("Renombrar acceso")
+            .setView(e)
+            .setPositiveButton("Guardar") { _, _ ->
+                val n = e.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    items[pos] = n + "|" + items[pos].substringAfter('|')
+                    savePanel(panel, items)
+                    buildSitesPanels()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun removeSite(panel: Int, pos: Int) {
+        val items = loadPanel(panel).toMutableList()
+        if (pos < items.size) {
+            items.removeAt(pos)
+            savePanel(panel, items)
+            buildSitesPanels()
+            toast("Acceso eliminado")
         }
+    }
+
+    /** Arrastre para reordenar (4.0 U8): suelta sobre otra celda y queda ahí. */
+    private fun startSiteDrag(pos: Int, view: View) {
+        try {
+            val data = android.content.ClipData.newPlainText("pos", pos.toString())
+            view.startDragAndDrop(data, View.DragShadowBuilder(view), null, 0)
+            view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        } catch (e: Exception) { }
+    }
+
+    private fun setupSiteDrag(gv: GridView, panel: Int) {
+        gv.setOnDragListener { _, ev ->
+            when (ev.action) {
+                android.view.DragEvent.ACTION_DRAG_STARTED -> true
+                android.view.DragEvent.ACTION_DROP -> {
+                    val from = ev.clipData?.getItemAt(0)?.text?.toString()?.toIntOrNull() ?: -1
+                    val to = gv.pointToPosition(ev.x.toInt(), ev.y.toInt())
+                    if (from >= 0 && to != GridView.INVALID_POSITION && from != to) {
+                        val items = loadPanel(panel).toMutableList()
+                        if (from < items.size && to < items.size) {
+                            val moved = items.removeAt(from)
+                            items.add(to, moved)
+                            savePanel(panel, items)
+                            buildSitesPanels()
+                        }
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun renderSitesDots() {
+        sitesDots.removeAllViews()
+        for (i in 0 until 3) {
+            val dot = TextView(this)
+            dot.text = "•"
+            dot.textSize = 17f
+            dot.setPadding(dp(5), 0, dp(5), 0)
+            dot.setTextColor(if (i == sitesPage) 0xFFFF6D00.toInt() else 0xFFCCCCCC.toInt())
+            dot.setOnClickListener { jumpSitesPage(i) }
+            sitesDots.addView(dot)
+        }
+    }
+
+    private fun jumpSitesPage(i: Int) {
+        val w = sitesPager.width.coerceAtLeast(1)
+        sitesPager.smoothScrollTo(i * w, 0)
+        sitesPage = i.coerceIn(0, 2)
+        renderSitesDots()
+        updateSitesTitle()
+    }
+
+    private fun updateSitesTitle() {
+        txtSitesTitle.text = PANEL_TITLES[sitesPage.coerceIn(0, 2)] +
+            if (editSites) "  ·  modo edición" else ""
     }
 
     private fun addSiteDialog() {
@@ -1519,17 +1936,18 @@ class BrowserActivity : Activity() {
         val eUrl = android.widget.EditText(this); eUrl.hint = "URL (https://…)"
         lay.addView(eName); lay.addView(eUrl)
         AlertDialog.Builder(this)
-            .setTitle("Añadir acceso directo")
+            .setTitle("Añadir acceso directo a «Mis sitios»")
             .setView(lay)
             .setPositiveButton("Añadir") { _, _ ->
                 var u = eUrl.text.toString().trim()
                 val n = eName.text.toString().trim()
                 if (u.isEmpty()) return@setPositiveButton
                 if (!u.contains("://")) u = "https://$u"
-                val l = loadSites().toMutableList()
+                val l = loadPanel(2)
                 l.add("${n.ifEmpty { Uri.parse(u).host ?: u }}|$u")
-                saveSites(l)
-                refreshSites()
+                savePanel(2, l)
+                buildSitesPanels()
+                toast("Añadido a «Mis sitios» con su icono")
             }
             .setNegativeButton("Cancelar", null)
             .show()
@@ -1635,11 +2053,19 @@ class BrowserActivity : Activity() {
                 t.showHome = false
                 updateTabButton()
                 renderStrip()
-                // historial de paginas (las pestañas privadas no registran)
+                // historial de paginas (las pestañas privadas no registran;
+                // cada usuario tiene su propio historial)
                 if (!t.priv) {
-                    try { eng.db.addHistory(url, t.title) } catch (e: Exception) { }
+                    try { eng.db.addHistory(url, t.title, Users.active(this@BrowserActivity)) } catch (e: Exception) { }
                 }
                 if (isActive) editUrl.setText(url)
+            }
+            // 4.0: credenciales — errores JS a consola + detección de formularios
+            // + autorrelleno de lo guardado para este host
+            if (!t.priv && url != null && url.startsWith("http")) {
+                injectOn(view, ONERROR_JS)
+                injectOn(view, CREDS_JS)
+                maybeAutofill(view, url)
             }
         }
 
@@ -1697,6 +2123,11 @@ class BrowserActivity : Activity() {
             view: WebView?, request: WebResourceRequest?
         ): WebResourceResponse? {
             val u = request?.url?.toString() ?: return null
+            // 4.0 F6: registro de peticiones de red (activable por sesión)
+            if (eng.sp.getBoolean("netlog", false)) {
+                com.turbodl.util.DevLog.logNet(
+                    request.method ?: "GET", u, "", request.isForMainFrame)
+            }
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
                 addDetected(Kit.normalizeSniffUrl(u), "req",
                     tabUid = tabOf(view)?.uid ?: tabs.getOrNull(cur)?.uid ?: -1)
@@ -1763,6 +2194,23 @@ class BrowserActivity : Activity() {
                     if (newProgress in 1..99) "✕" else "⟳"
             }
             if (newProgress >= 90) injectOn(view)
+        }
+
+        /** 4.0 F6: consola de JavaScript estilo DevTools (nativa del WebView). */
+        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+            try {
+                val m = consoleMessage
+                if (m != null) {
+                    val nivel = when (m.messageLevel()) {
+                        android.webkit.ConsoleMessage.MessageLevel.ERROR -> "error"
+                        android.webkit.ConsoleMessage.MessageLevel.WARNING -> "warn"
+                        else -> "log"
+                    }
+                    com.turbodl.util.DevLog.logCon(nivel,
+                        "${m.message()} (${m.sourceId()?.substringAfterLast('/') ?: ""}:${m.lineNumber()})")
+                }
+            } catch (e: Exception) { }
+            return super.onConsoleMessage(consoleMessage)
         }
 
         /** target=_blank / window.open: nueva pestaña en primera fila. */
@@ -1993,7 +2441,8 @@ class BrowserActivity : Activity() {
     private fun bookmarks(): ArrayList<Pair<String, String>> {
         val out = ArrayList<Pair<String, String>>()
         try {
-            val arr = JSONArray(eng.sp.getString("bookmarks", "[]") ?: "[]")
+            val arr = JSONArray(eng.sp.getString("bookmarks_" + Users.active(this),
+                eng.sp.getString("bookmarks", "[]") ?: "[]") ?: "[]")
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 out.add(o.optString("u", "") to o.optString("t", ""))
@@ -2010,7 +2459,7 @@ class BrowserActivity : Activity() {
         val arr = JSONArray()
         arr.put(JSONObject().put("u", url).put("t", title.ifEmpty { url }))
         for ((u, t) in list) arr.put(JSONObject().put("u", u).put("t", t))
-        eng.sp.edit().putString("bookmarks", arr.toString()).apply()
+        eng.sp.edit().putString("bookmarks_" + Users.active(this), arr.toString()).apply()
     }
 
     /** Visor de marcadores: abrir (toque) o borrar (pulsacion larga). */
@@ -2055,7 +2504,7 @@ class BrowserActivity : Activity() {
             rows.removeAt(p)
             val arr = JSONArray()
             for ((u, t) in rows) arr.put(JSONObject().put("u", u).put("t", t))
-            eng.sp.edit().putString("bookmarks", arr.toString()).apply()
+            eng.sp.edit().putString("bookmarks_" + Users.active(this), arr.toString()).apply()
             adapter.notifyDataSetChanged()
             toast("Marcador eliminado")
             true
@@ -2081,14 +2530,77 @@ class BrowserActivity : Activity() {
     }
 
     /**
-     * Contador del botón de medios: SOLO la pestaña activa. Cada pestaña
-     * tiene su propia lista de capturas (informe del usuario: al cambiar
-     * de pestaña aparecía todo unificado y no se sabía qué era de qué).
+     * Contador del botón de medios y del FAB flotante (4.0 U5): SOLO la
+     * pestaña activa. Cada pestaña tiene su propia lista de capturas.
      */
     private fun updateDetectBtn() {
         val uid = tabs.getOrNull(cur)?.uid ?: -1
         val n = synchronized(detected) { detected.values.count { it.tabUid == uid } }
         btnVideos.text = if (n > 0) "⬇ Detectados: $n" else "⬇ Detectados"
+        // FAB flotante: medios + descargas directas, en tiempo real
+        val total = n + downloadEvents.size
+        fab.text = "▶ $total"
+        fab.visibility =
+            if (total > 0 && !homeOverlay.isVisible()) View.VISIBLE else View.GONE
+    }
+
+    /** El FAB abre un selector: medios de la página o descargas directas. */
+    private fun showDetectChooser() {
+        val uid = tabs.getOrNull(cur)?.uid ?: -1
+        val n = synchronized(detected) { detected.values.count { it.tabUid == uid } }
+        val d = downloadEvents.size
+        val opts = ArrayList<String>()
+        if (n > 0) opts.add("🎬 Medios detectados ($n)")
+        if (d > 0) opts.add("📥 Descargas directas ($d)")
+        if (opts.isEmpty()) {
+            toast("Nada detectado aún en esta pestaña")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Elementos detectados en esta página")
+            .setItems(opts.toTypedArray()) { _, w ->
+                when {
+                    opts[w].startsWith("🎬") -> showDetected()
+                    else -> showDownloadEvents()
+                }
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    /** Lista de descargas directas capturadas por el DownloadListener. */
+    private fun showDownloadEvents() {
+        val urls = ArrayList(downloadEvents.keys)
+        if (urls.isEmpty()) { toast("No hay descargas directas capturadas"); return }
+        val labels = urls.map { "${MediaProbe.hostOf(it)} — ${it.takeLast(60)}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Descargas directas (${urls.size})")
+            .setItems(labels) { dlg, w ->
+                val url = urls[w]
+                AlertDialog.Builder(this)
+                    .setTitle("Descargar este archivo")
+                    .setMessage(url.takeLast(80))
+                    .setPositiveButton("⬇ Ahora") { _, _ ->
+                        downloadEvents.remove(url)
+                        updateDetectBtn()
+                        startDownloadRaw(url, null, false)
+                        dlg.dismiss()
+                    }
+                    .setNegativeButton("En cola") { _, _ ->
+                        downloadEvents.remove(url)
+                        updateDetectBtn()
+                        startDownloadRaw(url, null, true)
+                        dlg.dismiss()
+                    }
+                    .setNeutralButton("Cerrar", null)
+                    .show()
+            }
+            .setNeutralButton("Limpiar lista") { _, _ ->
+                downloadEvents.clear()
+                updateDetectBtn()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
     }
 
     /** Quita las capturas de una pestaña (al cerrarla). */
@@ -2181,64 +2693,103 @@ class BrowserActivity : Activity() {
         val icon: String, val label: String,
         val active: Boolean = false, val action: () -> Unit)
 
-    /** Menú inferior en cuadrícula de 5 columnas y 2 filas por página,
-     *  con puntos de página y botones salir/colapsar (estilo 4.0). */
+    /** Menú inferior en PÁGINAS DESLIZABLES (4.0): swipe izquierda/derecha
+     *  cambia de página; los puntos reflejan y permiten saltar. 3 páginas
+     *  × 10 acciones, todas reales. */
     private fun showMenuSheet() {
         hideSheets()
-        menuPage = 0
-        renderMenuPage()
+        renderMenuPages()
         menuSheet.visibility = View.VISIBLE
+        menuPager.post {
+            val w = menuPager.width.coerceAtLeast(1)
+            menuPager.scrollTo(menuPage.coerceIn(0, 2) * w, 0)
+        }
     }
 
-    private fun renderMenuPage() {
-        menuGrid.removeAllViews()
-        for (c in menuCells(menuPage)) menuGrid.addView(menuCell(c))
+    private fun renderMenuPages() {
+        menuPages.removeAllViews()
+        for (p in 0 until 3) {
+            val page = android.widget.GridLayout(this)
+            page.columnCount = 5
+            page.rowCount = 2
+            page.setPadding(dp(6), dp(4), dp(6), dp(4))
+            for (c in menuCells(p)) page.addView(menuCell(c))
+            menuPages.addView(page, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        renderMenuDots()
+    }
+
+    private fun renderMenuDots() {
         menuDots.removeAllViews()
-        for (i in 0 until 2) {
+        for (i in 0 until 3) {
             val dot = TextView(this)
             dot.text = "•"
             dot.textSize = 18f
             dot.setPadding(dp(6), 0, dp(6), 0)
             dot.setTextColor(if (i == menuPage) 0xFFFF6D00.toInt() else 0xFFCCCCCC.toInt())
-            dot.setOnClickListener { menuPage = i; renderMenuPage() }
+            dot.setOnClickListener { jumpMenuPage(i) }
             menuDots.addView(dot)
         }
     }
 
-    /** Las dos páginas del menú: navegación/ajustes y herramientas de la
-     *  página. Todos los botones corresponden a funciones reales. */
+    private fun jumpMenuPage(i: Int) {
+        val w = menuPager.width.coerceAtLeast(1)
+        menuPager.smoothScrollTo(i.coerceIn(0, 2) * w, 0)
+        menuPage = i.coerceIn(0, 2)
+        renderMenuDots()
+    }
+
+    /** Las tres páginas del menú: navegación, herramientas y privacidad.
+     *  Los elementos con estado activo se pintan en color de acento. */
     private fun menuCells(page: Int): List<MenuCell> {
         val t = tabs.getOrNull(cur)
         val pageUrl = t?.url ?: ""
-        return if (page == 0) listOf(
-            MenuCell("🌙", "Modo nocturno") { toggleDarkTheme() },
-            MenuCell("⭐", "Marcadores") { hideSheets(); showBookmarks() },
-            MenuCell("🕘", "Historial") { hideSheets(); showPageHistory() },
-            MenuCell("⬇", "Detectados") { hideSheets(); showDetected() },
-            MenuCell("🕵", "Incógnito") { newTab("", privateTab = true); hideSheets() },
-            MenuCell("↗", "Compartir") { hideSheets(); sharePage() },
-            MenuCell("☆+", "Añadir marcador") { addBookmark(pageUrl, web.title ?: ""); hideSheets() },
-            MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPage() },
-            MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
-            MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) }
-        ) else listOf(
-            MenuCell("🛡", "Bloqueos") { hideSheets(); showBlockedDialog() },
-            MenuCell("🛡", "Bloqueador", active = eng.sp.getBoolean("adblock", true)) {
-                val nv = !eng.sp.getBoolean("adblock", true)
-                eng.sp.edit().putBoolean("adblock", nv).apply()
-                toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
-                tabs.forEach { it.wv?.reload() }
-                renderMenuPage()
-            },
-            MenuCell("🚫", "Eximir sitio") { hideSheets(); toggleSiteExempt(pageUrl) },
-            MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPage() },
-            MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
-            MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPage() },
-            MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
-            MenuCell("🖼", "Ventana flot.") { hideSheets(); enterPip() },
-            MenuCell("🔎", "Escanear medios") { hideSheets(); inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") },
-            MenuCell("🚪", "Salir") { finishAffinity() }
-        )
+        return when (page) {
+            0 -> listOf(
+                MenuCell("🌙", "Modo nocturno", active = Ui.isDark(this)) { toggleDarkTheme() },
+                MenuCell("⭐", "Marcadores") { hideSheets(); showBookmarks() },
+                MenuCell("🕘", "Historial") { hideSheets(); showPageHistory() },
+                MenuCell("⬇", "Detectados") { hideSheets(); showDetected() },
+                MenuCell("🕵", "Incógnito") { newTab("", privateTab = true); hideSheets() },
+                MenuCell("↗", "Compartir") { hideSheets(); sharePage() },
+                MenuCell("☆+", "Añadir marcador") { addBookmark(pageUrl, web.title ?: ""); hideSheets() },
+                MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPages() },
+                MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
+                MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) }
+            )
+            1 -> listOf(
+                MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
+                MenuCell("🗒", "Notas") { hideSheets(); showNotes() },
+                MenuCell("📤", "Exportar") { hideSheets(); showExportDialog() },
+                MenuCell("📦", "Guardar offline") { hideSheets(); saveCurrentOffline() },
+                MenuCell("🗄", "Págs. guardadas") { hideSheets(); showSavedPages() },
+                MenuCell("🔬", "Ver código") { hideSheets(); showSource() },
+                MenuCell("⌨", "Consola JS") { hideSheets(); showJsConsole() },
+                MenuCell("📡", "Registro red") { hideSheets(); showNetLog() },
+                MenuCell("🖼", "Ventana flot.") { hideSheets(); enterPip() },
+                MenuCell("🔎", "Escanear medios") { hideSheets(); inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") }
+            )
+            else -> listOf(
+                MenuCell("🛡", "Bloqueador", active = eng.sp.getBoolean("adblock", true)) {
+                    val nv = !eng.sp.getBoolean("adblock", true)
+                    eng.sp.edit().putBoolean("adblock", nv).apply()
+                    toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
+                    updateShield()
+                    tabs.forEach { it.wv?.reload() }
+                    renderMenuPages()
+                },
+                MenuCell("🚫", "Eximir sitio") { hideSheets(); toggleSiteExempt(pageUrl) },
+                MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
+                MenuCell("🔑", "Credenciales") { hideSheets(); showCredsDialog() },
+                MenuCell("👥", "Usuarios") { hideSheets(); showUsersDialog() },
+                MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPages() },
+                MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
+                MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
+                MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPages() },
+                MenuCell("🚪", "Salir") { finishAffinity() }
+            )
+        }
     }
 
     private fun menuCell(c: MenuCell): View {
@@ -2324,59 +2875,73 @@ class BrowserActivity : Activity() {
         suggestionsHost.visibility = View.GONE
     }
 
-    /** Panel de sugerencias bajo la barra superior: URL directa, marcadores,
-     *  historial de páginas y búsquedas previas filtrados por lo tecleado. */
+    private class Sugg(val icon: String, val title: String, val url: String)
+
+    /** Panel de sugerencias bajo la barra superior (4.0 U10): LISTA
+     *  DESPLAZABLE hasta el último resultado — URL directa, marcadores,
+     *  historial de páginas y búsquedas previas, filtrados por lo tecleado.
+     *  Altura con tope (420dp) y scroll interno; nunca más sin scroll. */
     private fun showSuggestions(q: String) {
         if (suppressSuggest || q.isBlank()) { hideSuggestions(); return }
         val low = q.lowercase(Locale.US)
-        val rows = ArrayList<Array<String>>() // [icono, titulo, url]
+        val rows = ArrayList<Sugg>()
         val uq = q.trim()
         if (uq.contains(".") && !uq.contains(" ")) {
-            rows.add(arrayOf("↗", "Ir a $uq",
+            rows.add(Sugg("↗", "Ir a $uq",
                 if (uq.startsWith("http")) uq else "https://$uq"))
         }
         try {
-            val arr = JSONArray(eng.sp.getString("bookmarks", "[]") ?: "[]")
+            val arr = JSONArray(eng.sp.getString("bookmarks_" + Users.active(this), "[]") ?: "[]")
             for (i in 0 until arr.length()) {
-                if (rows.size > 8) break
+                if (rows.size > 60) break
                 val o = arr.optJSONObject(i) ?: continue
                 val t = o.optString("t", "")
                 val u = o.optString("u", "")
                 if (t.lowercase(Locale.US).contains(low) ||
                     u.lowercase(Locale.US).contains(low))
-                    rows.add(arrayOf("☆", t.ifEmpty { MediaProbe.hostOf(u) }, u))
+                    rows.add(Sugg("☆", t.ifEmpty { MediaProbe.hostOf(u) }, u))
             }
         } catch (e: Exception) { }
         try {
-            for (r in eng.db.history(50)) {
-                if (rows.size > 10) break
+            for (r in eng.db.history(120, Users.active(this))) {
+                if (rows.size > 80) break
                 if (r.url.startsWith("http") &&
                     ((r.title.ifEmpty { r.url }).lowercase(Locale.US).contains(low) ||
                         r.url.lowercase(Locale.US).contains(low)))
-                    rows.add(arrayOf("🕘", (r.title.ifEmpty { r.url }).take(60), r.url))
+                    rows.add(Sugg("🕘", (r.title.ifEmpty { r.url }).take(60), r.url))
             }
         } catch (e: Exception) { }
         try {
             for (h in history()) {
-                if (rows.size > 12) break
+                if (rows.size > 120) break
                 if (h.lowercase(Locale.US).contains(low))
-                    rows.add(arrayOf("🔎", h, Profiles.engineUrl(eng.sp, h)))
+                    rows.add(Sugg("🔎", h, Profiles.engineUrl(eng.sp, h)))
             }
         } catch (e: Exception) { }
         if (rows.isEmpty()) { hideSuggestions(); return }
-        suggestionsHost.removeAllViews()
-        for (r in rows) suggestionsHost.addView(suggestionRow(r[0], r[1], r[2]))
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): Sugg = rows[p]
+            override fun getItemId(p: Int): Long = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View =
+                suggestionRow(getItem(p))
+        }
+        suggestionsList.adapter = ad
+        // altura: una fila por resultado con tope; la lista hace scroll
+        val lp = suggestionsList.layoutParams
+        lp.height = Math.min(dp(52) * rows.size + dp(12), dp(420))
+        suggestionsList.layoutParams = lp
         suggestionsHost.visibility = View.VISIBLE
     }
 
-    private fun suggestionRow(icon: String, title: String, url: String): View {
+    private fun suggestionRow(s: Sugg): View {
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         row.setPadding(dp(14), dp(9), dp(6), dp(9))
         row.background = getDrawable(android.R.drawable.list_selector_background)
         val ic = TextView(this)
-        ic.text = icon
+        ic.text = s.icon
         ic.textSize = 15f
         ic.setPadding(dp(4), 0, dp(10), 0)
         row.addView(ic)
@@ -2386,14 +2951,14 @@ class BrowserActivity : Activity() {
         t1.textSize = 13.5f
         t1.setSingleLine(true)
         t1.ellipsize = android.text.TextUtils.TruncateAt.END
-        t1.text = title
+        t1.text = s.title
         t1.setTextColor(0xFF212121.toInt())
         col.addView(t1)
         val t2 = TextView(this)
         t2.textSize = 11f
         t2.setSingleLine(true)
         t2.ellipsize = android.text.TextUtils.TruncateAt.END
-        t2.text = url
+        t2.text = s.url
         t2.setTextColor(0xFF9E9E9E.toInt())
         col.addView(t2)
         row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -2404,18 +2969,18 @@ class BrowserActivity : Activity() {
         go.contentDescription = "Abrir en nueva pestaña"
         go.setOnClickListener {
             suppressSuggest = true
-            editUrl.setText(url)
+            editUrl.setText(s.url)
             suppressSuggest = false
-            newTab(url, true)
+            newTab(s.url, true)
             hideSuggestions()
             hideKb()
         }
         row.addView(go)
         row.setOnClickListener {
             suppressSuggest = true
-            editUrl.setText(url)
+            editUrl.setText(s.url)
             suppressSuggest = false
-            load(url)
+            load(s.url)
             hideKb()
         }
         return row
@@ -2743,11 +3308,575 @@ class BrowserActivity : Activity() {
         }
     }
 
+    // ================= nuevas funciones 4.0 =================
+    // Notas · páginas guardadas · exportación · herramientas de desarrollador
+    // · credenciales · usuarios sandbox
+
+    private fun clipboard(text: String) {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("turbodl", text))
+    }
+
+    private fun tsName(): String =
+        java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US).format(java.util.Date())
+
+    private fun sanitizeName(t: String): String =
+        t.replace(Regex("[^A-Za-z0-9ÁÉÍÓÚáéíóúñÑ _-]"), "").trim().take(50).ifEmpty { "pagina" }
+
+    private fun getDomHtml(cb: (String) -> Unit) {
+        try {
+            web.evaluateJavascript("document.documentElement.outerHTML") { r ->
+                val s = r ?: "null"
+                val html = try {
+                    if (s.startsWith("\"")) org.json.JSONTokener(s).nextValue() as String else s
+                } catch (e: Exception) { s }
+                runOnUiThread { cb(html) }
+            }
+        } catch (e: Exception) { cb("") }
+    }
+
+    // ---------------- notas (F5) ----------------
+
+    /** Notas con CRUD completo (4.0): prompts y textos que se copian a los
+     *  chatbots; copiar al portapapeles con un toque desde el navegador. */
+    private fun showNotes() {
+        val ndb = com.turbodl.db.NotesDb.get(this)
+        val rows = ndb.notes()
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val lv = ListView(this)
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): com.turbodl.db.NotesDb.Note = rows[p]
+            override fun getItemId(p: Int): Long = rows[p].id
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val v = TextView(this@BrowserActivity)
+                val n = getItem(p)
+                v.setPadding(40, 26, 40, 26)
+                v.textSize = 13f
+                v.text = n.preview() + "\n" +
+                    java.text.DateFormat.getDateTimeInstance(
+                        java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(java.util.Date(n.time))
+                v.background = getDrawable(android.R.drawable.list_selector_background)
+                return v
+            }
+        }
+        lv.adapter = ad
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 620))
+        if (rows.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
+            empty.setPadding(40, 30, 40, 30)
+            lay.addView(empty, 0)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("🗒 Notas (${rows.size})")
+            .setView(lay)
+            .setNegativeButton("Cerrar", null)
+            .create()
+        val btnNew = Button(this)
+        btnNew.text = "＋ Nueva nota"
+        lay.addView(btnNew)
+        btnNew.setOnClickListener { dlg.dismiss(); editNote(-1L) }
+        lv.setOnItemClickListener { _, _, p, _ ->
+            val n = rows[p]
+            val acts = arrayOf("✏ Editar", "📋 Copiar al portapapeles", "↗ Compartir", "🗑 Eliminar")
+            AlertDialog.Builder(this)
+                .setTitle(n.title.ifEmpty { "(sin título)" })
+                .setItems(acts) { _, w ->
+                    when (w) {
+                        0 -> { dlg.dismiss(); editNote(n.id) }
+                        1 -> { clipboard(n.body); toast("Copiado: pégalo donde quieras") }
+                        2 -> try {
+                            val i = android.content.Intent(android.content.Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(android.content.Intent.EXTRA_TEXT, n.body)
+                            startActivity(android.content.Intent.createChooser(i, "Compartir nota"))
+                        } catch (e: Exception) { }
+                        3 -> {
+                            ndb.deleteNote(n.id)
+                            rows.removeAt(p)
+                            ad.notifyDataSetChanged()
+                            toast("Nota eliminada")
+                        }
+                    }
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+        dlg.show()
+    }
+
+    /** Editor de nota: creación y edición (misma ventana). */
+    private fun editNote(id: Long) {
+        val ndb = com.turbodl.db.NotesDb.get(this)
+        val existing = if (id > 0) ndb.notes().firstOrNull { it.id == id } else null
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(50, 30, 50, 0)
+        val et = android.widget.EditText(this)
+        et.hint = "Título"
+        et.setText(existing?.title ?: "")
+        val eb = android.widget.EditText(this)
+        eb.hint = "Escribe aquí (prompt, texto…)"
+        eb.setMinLines(6)
+        eb.gravity = Gravity.TOP
+        eb.setText(existing?.body ?: "")
+        lay.addView(et); lay.addView(eb)
+        AlertDialog.Builder(this)
+            .setTitle(if (existing == null) "Nueva nota" else "Editar nota")
+            .setView(lay)
+            .setPositiveButton("Guardar") { _, _ ->
+                val t = et.text.toString().trim()
+                val b = eb.text.toString()
+                if (b.isBlank() && t.isBlank()) return@setPositiveButton
+                if (existing == null)
+                    ndb.addNote(t, b, tabs.getOrNull(cur)?.url ?: "")
+                else ndb.updateNote(existing.id, t, b)
+                toast("Nota guardada")
+            }
+            .setNeutralButton("📋 Copiar todo") { _, _ ->
+                clipboard(eb.text.toString())
+                toast("Copiado al portapapeles")
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ---------------- páginas guardadas offline (F4) ----------------
+
+    private fun saveCurrentOffline() {
+        val t = tabs.getOrNull(cur) ?: return
+        if (!t.url.startsWith("http")) { toast("Abre una página web primero"); return }
+        val title = (web.title ?: "").ifEmpty { MediaProbe.hostOf(t.url) }
+        toast("Guardando la página con CSS y JS…")
+        Exporter.saveOffline(web, t.url, title) { p ->
+            toast(if (p.isEmpty())
+                "No se pudo guardar (prueba de nuevo tras terminar la carga)"
+            else "Guardada offline: ${java.io.File(p).name}")
+        }
+    }
+
+    private fun showSavedPages() {
+        val ndb = com.turbodl.db.NotesDb.get(this)
+        val rows = ndb.saved()
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val lv = ListView(this)
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): com.turbodl.db.NotesDb.SavedPage = rows[p]
+            override fun getItemId(p: Int): Long = rows[p].id
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val v = TextView(this@BrowserActivity)
+                val s = getItem(p)
+                v.setPadding(40, 26, 40, 26)
+                v.textSize = 13f
+                v.text = "${s.title.take(60)}\n${MediaProbe.hostOf(s.url)} · " +
+                    Kit.fmtBytes(s.size) + " · " +
+                    java.text.DateFormat.getDateTimeInstance(
+                        java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(java.util.Date(s.time))
+                v.background = getDrawable(android.R.drawable.list_selector_background)
+                return v
+            }
+        }
+        lv.adapter = ad
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 620))
+        if (rows.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Sin páginas guardadas. Usa «Guardar offline» en el menú (guarda CSS y JS: se ve igual que en línea, sin conexión)."
+            empty.setPadding(40, 30, 40, 30)
+            lay.addView(empty, 0)
+        }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("📦 Páginas guardadas (${rows.size})")
+            .setView(lay)
+            .setNegativeButton("Cerrar", null)
+            .create()
+        lv.setOnItemClickListener { _, _, p, _ ->
+            dlg.dismiss()
+            hideSheets()
+            load("file://" + rows[p].path)
+        }
+        lv.setOnItemLongClickListener { _, _, p, _ ->
+            val s = rows[p]
+            AlertDialog.Builder(this)
+                .setTitle("Eliminar «${s.title.take(30)}»")
+                .setPositiveButton("Eliminar") { _, _ ->
+                    try { java.io.File(s.path).delete() } catch (e: Exception) { }
+                    ndb.deleteSaved(s.id)
+                    rows.removeAt(p)
+                    ad.notifyDataSetChanged()
+                    toast("Página guardada eliminada")
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+            true
+        }
+        dlg.show()
+    }
+
+    // ---------------- exportación (F3) ----------------
+
+    private fun showExportDialog() {
+        val t = tabs.getOrNull(cur) ?: return
+        if (!t.url.startsWith("http")) { toast("Abre una página web primero"); return }
+        val title = (web.title ?: "").ifEmpty { MediaProbe.hostOf(t.url) }
+        val base = sanitizeName(title)
+        val opts = arrayOf(
+            "📄 PDF (sistema: documento completo, abre el diálogo de imprimir)",
+            "🖨 PDF (captura rápida del render actual)",
+            "📝 Markdown (.md, listo para LLMs)",
+            "📄 HTML completo (.html)",
+            "📃 Texto plano (.txt)",
+            "🖼 Imagen PNG (captura completa)",
+            "📦 Guardar offline (.mht: CSS+JS incluidos, sin conexión)")
+        AlertDialog.Builder(this)
+            .setTitle("Exportar «${title.take(28)}»")
+            .setItems(opts) { _, w ->
+                when (w) {
+                    0 -> Exporter.exportPdfSystem(this, web, title)
+                    1 -> Exporter.exportPdfCapture(this, web, title) { p ->
+                        toast(if (p.isEmpty()) "No se pudo generar el PDF" else "PDF en $p") }
+                    2 -> getDomHtml { html ->
+                        Exporter.exportMarkdown(html, t.url, title) { md ->
+                            runOnUiThread {
+                                if (md.isEmpty()) toast("No se pudo convertir a Markdown")
+                                else {
+                                    val p = Exporter.saveFile(this,
+                                        "${base}_${tsName()}.md", "text/markdown",
+                                        md.toByteArray(Charsets.UTF_8))
+                                    toast(if (p == null) "Error al guardar" else "Markdown en $p")
+                                }
+                            }
+                        } }
+                    3 -> getDomHtml { html ->
+                        val p = Exporter.saveFile(this,
+                            "${base}_${tsName()}.html", "text/html",
+                            html.toByteArray(Charsets.UTF_8))
+                        toast(if (p == null) "Error al guardar" else "HTML en $p") }
+                    4 -> try {
+                        web.evaluateJavascript("document.body.innerText") { r ->
+                            val txt = try {
+                                if (r != null && r.startsWith("\""))
+                                    org.json.JSONTokener(r).nextValue() as String else (r ?: "")
+                            } catch (e: Exception) { r ?: "" }
+                            val p = Exporter.saveFile(this,
+                                "${base}_${tsName()}.txt", "text/plain",
+                                txt.toByteArray(Charsets.UTF_8))
+                            toast(if (p == null) "Error al guardar" else "Texto en $p")
+                        }
+                    } catch (e: Exception) { }
+                    5 -> Exporter.exportPng(this, web, title) { p ->
+                        toast(if (p.isEmpty()) "No se pudo capturar" else "PNG en $p") }
+                    6 -> saveCurrentOffline()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ---------------- herramientas de desarrollador (F6) ----------------
+
+    private fun showSource() {
+        getDomHtml { html ->
+            if (html.isEmpty()) { toast("No se pudo obtener el código"); return@getDomHtml }
+            val tv = TextView(this)
+            tv.typeface = android.graphics.Typeface.MONOSPACE
+            tv.textSize = 10.5f
+            tv.setPadding(40, 30, 40, 20)
+            tv.text = html.take(60000) +
+                if (html.length > 60000) "\n\n… (recortado; guarda el archivo para verlo completo)" else ""
+            val sv = android.widget.ScrollView(this)
+            sv.addView(tv)
+            AlertDialog.Builder(this)
+                .setTitle("🔬 HTML en bruto (DOM vivo)")
+                .setView(sv)
+                .setPositiveButton("Cerrar", null)
+                .setNeutralButton("💾 Guardar .html") { _, _ ->
+                    val p = Exporter.saveFile(this,
+                        sanitizeName(tabs.getOrNull(cur)?.url ?: "pagina") +
+                            "_${tsName()}.html", "text/html",
+                        html.toByteArray(Charsets.UTF_8))
+                    toast(if (p == null) "Error al guardar" else "HTML en $p")
+                }
+                .show()
+        }
+    }
+
+    private fun showNetLog() {
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val sw = android.widget.Switch(this)
+        sw.text = "  Registrar peticiones de red"
+        sw.isChecked = eng.sp.getBoolean("netlog", false)
+        sw.setPadding(40, 20, 40, 10)
+        sw.setOnCheckedChangeListener { _, c ->
+            eng.sp.edit().putBoolean("netlog", c).apply()
+            if (c) com.turbodl.util.DevLog.clearNet()
+        }
+        lay.addView(sw)
+        val rows = com.turbodl.util.DevLog.netRows()
+        val tv = TextView(this)
+        tv.typeface = android.graphics.Typeface.MONOSPACE
+        tv.textSize = 10f
+        tv.setPadding(40, 20, 40, 20)
+        tv.text = if (rows.isEmpty())
+            "Sin peticiones registradas todavía. Activa el interruptor y recarga la página: aquí aparecen todas las peticiones (método, tipo y URL).\n\nNota: la API del WebView no entrega las cabeceras de respuesta completas; esto registra lo disponible."
+        else rows.joinToString("\n") { it.line() }
+        val sv = android.widget.ScrollView(this)
+        sv.addView(tv)
+        lay.addView(sv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 560))
+        val btnC = Button(this)
+        btnC.text = "🧹 Limpiar registro"
+        lay.addView(btnC)
+        AlertDialog.Builder(this)
+            .setTitle("📡 Registro de red (${rows.size})")
+            .setView(lay)
+            .setNegativeButton("Cerrar", null)
+            .show()
+        btnC.setOnClickListener {
+            com.turbodl.util.DevLog.clearNet()
+            toast("Registro limpiado")
+        }
+    }
+
+    private fun showJsConsole() {
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val lv = ListView(this)
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = com.turbodl.util.DevLog.conRows().size
+            override fun getItem(p: Int): com.turbodl.util.DevLog.ConRow =
+                com.turbodl.util.DevLog.conRows()[p]
+            override fun getItemId(p: Int): Long = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val v = TextView(this@BrowserActivity)
+                val c = getItem(p)
+                v.setPadding(40, 18, 40, 18)
+                v.textSize = 11f
+                v.typeface = android.graphics.Typeface.MONOSPACE
+                v.text = c.line()
+                v.setTextColor(when (c.level) {
+                    "error" -> 0xFFC62828.toInt()
+                    "warn" -> 0xFFEF6C00.toInt()
+                    else -> 0xFF212121.toInt()
+                })
+                return v
+            }
+        }
+        lv.adapter = ad
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 500))
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.setPadding(40, 0, 40, 0)
+        val e = android.widget.EditText(this)
+        e.hint = "javascript: document.title"
+        e.setSingleLine(true)
+        row.addView(e, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val bRun = Button(this)
+        bRun.text = "▶"
+        bRun.textSize = 12f
+        row.addView(bRun)
+        lay.addView(row)
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("⌨ Consola JavaScript (${com.turbodl.util.DevLog.conRows().size})")
+            .setView(lay)
+            .setNeutralButton("🧹 Limpiar") { _, _ ->
+                com.turbodl.util.DevLog.clearCon()
+                ad.notifyDataSetChanged()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+        bRun.setOnClickListener {
+            val code = e.text.toString().trim()
+            if (code.isEmpty()) return@setOnClickListener
+            try {
+                web.evaluateJavascript(code) { r ->
+                    val out = r?.trim() ?: "null"
+                    com.turbodl.util.DevLog.logCon("log", "» $code\n← $out")
+                    runOnUiThread { ad.notifyDataSetChanged() }
+                }
+            } catch (ex: Exception) {
+                com.turbodl.util.DevLog.logCon("error", "eval: ${ex.message}")
+                ad.notifyDataSetChanged()
+            }
+            e.setText("")
+        }
+    }
+
+    // ---------------- usuarios sandbox (F2) ----------------
+
+    private fun showUsersDialog() {
+        val users = Users.list(this)
+        val active = Users.active(this)
+        val opts = ArrayList<String>()
+        opts.add("🏠 Principal" + (if (active == "main") "   (activo)" else ""))
+        users.forEach { opts.add("👤 ${it.name}" + (if (active == it.id) "   (activo)" else "")) }
+        opts.add("＋ Añadir usuario…")
+        opts.add("🗑 Eliminar usuario…")
+        AlertDialog.Builder(this)
+            .setTitle("👥 Usuarios (sandbox por usuario)")
+            .setMessage("Cada usuario tiene sus propias cookies, sesiones, credenciales, historial y accesos: los sitios web solo detectan al usuario activo. Al cambiar, la aplicación se reinicia.")
+            .setItems(opts.toTypedArray()) { _, w ->
+                when {
+                    w == opts.size - 1 -> deleteUsersDialog()
+                    w == opts.size - 2 -> addAndSwitchUser()
+                    w == 0 -> if (active != "main") confirmSwitchUser("main")
+                    else -> {
+                        val u = users[w - 1]
+                        if (u.id != active) confirmSwitchUser(u.id)
+                    }
+                }
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    private fun confirmSwitchUser(id: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Cambiar de usuario")
+            .setMessage("TurboDL se reiniciará con la sandbox de «${Users.nameOf(this, id)}»: sus cookies y credenciales son independientes y el servidor creerá que solo ese usuario ha accedido.")
+            .setPositiveButton("Reiniciar") { _, _ ->
+                Users.setActive(this, id)
+                Users.restartApp(this)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun addAndSwitchUser() {
+        val e = android.widget.EditText(this)
+        e.hint = "Nombre del usuario (p. ej. Trabajo)"
+        AlertDialog.Builder(this)
+            .setTitle("Nuevo usuario")
+            .setView(e)
+            .setPositiveButton("Crear") { _, _ ->
+                val n = e.text.toString().trim().ifEmpty { "Usuario" }
+                val u = Users.add(this, n)
+                confirmSwitchUser(u.id)
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun deleteUsersDialog() {
+        val users = Users.list(this)
+        if (users.isEmpty()) { toast("No hay usuarios adicionales"); return }
+        val names = users.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Eliminar usuario")
+            .setItems(names) { _, w ->
+                val u = users[w]
+                AlertDialog.Builder(this)
+                    .setTitle("Eliminar a «${u.name}»")
+                    .setMessage("Se borra su identidad (cookies guardadas en su sandbox, credenciales e historial).")
+                    .setPositiveButton("Eliminar") { _, _ ->
+                        val eraActivo = Users.active(this) == u.id
+                        Users.remove(this, u.id)
+                        toast("Usuario eliminado")
+                        if (eraActivo) Users.restartApp(this)
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    // ---------------- credenciales guardadas (F1) ----------------
+
+    private fun showCredsDialog() {
+        val uid = Users.active(this)
+        val rows = eng.db.creds(uid)
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        val lv = ListView(this)
+        val ad = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): Db.CredRow = rows[p]
+            override fun getItemId(p: Int): Long = rows[p].id
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
+                val v = TextView(this@BrowserActivity)
+                val c = getItem(p)
+                v.setPadding(40, 26, 40, 26)
+                v.textSize = 13f
+                v.text = "${c.host}\n${c.username.ifEmpty { "(solo bloqueo de guardado)" }}" +
+                    if (c.never) " · nunca preguntar" else ""
+                v.background = getDrawable(android.R.drawable.list_selector_background)
+                return v
+            }
+        }
+        lv.adapter = ad
+        lay.addView(lv, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 560))
+        if (rows.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Sin credenciales guardadas para el usuario activo.\n\nAl iniciar sesión en cualquier sitio, TurboDL ofrecerá guardar el usuario y la contraseña (cifrados con AES-256-GCM y la clave segura del dispositivo) y los rellenará automáticamente en tus próximas visitas."
+            empty.setPadding(40, 30, 40, 30)
+            lay.addView(empty, 0)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("🔑 Credenciales (${rows.size})")
+            .setView(lay)
+            .setNegativeButton("Cerrar", null)
+            .show()
+        lv.setOnItemClickListener { _, _, p, _ ->
+            val c = rows[p]
+            val acts = arrayOf("📋 Copiar usuario", "🗑 Eliminar")
+            AlertDialog.Builder(this)
+                .setTitle(c.host)
+                .setItems(acts) { _, w ->
+                    when (w) {
+                        0 -> { clipboard(c.username); toast("Usuario copiado") }
+                        1 -> {
+                            eng.db.deleteCred(c.id)
+                            rows.removeAt(p)
+                            ad.notifyDataSetChanged()
+                            toast("Credencial eliminada")
+                        }
+                    }
+                }
+                .setNegativeButton("Cerrar", null)
+                .show()
+        }
+    }
+
+    private var lastBack = 0L
+
+    /**
+     * Botón atrás consistente (4.0 U4): una única máquina de estados
+     * sugerencias → hojas → inicio ↔ web → salida con confirmación.
+     */
     override fun onBackPressed() {
-        if (homeOverlay.isVisible()) {
-            showHome(false)
-        } else if (web.canGoBack()) web.goBack()
-        else super.onBackPressed()
+        when {
+            suggestionsHost.isVisible() -> {
+                hideSuggestions()
+                hideKb()
+            }
+            tabSheet.isVisible() || menuSheet.isVisible() -> hideSheets()
+            homeOverlay.isVisible() -> {
+                val t = tabs.getOrNull(cur)
+                if (t != null && (t.url.isNotEmpty() || (t.wv?.canGoBack() == true)))
+                    showHome(false)
+                else {
+                    val now = System.currentTimeMillis()
+                    if (now - lastBack < 2200) finishAffinity()
+                    else { lastBack = now; toast("Pulsa atrás otra vez para salir") }
+                }
+            }
+            else -> {
+                val w = activeWv()
+                if (w != null && w.canGoBack()) w.goBack()
+                else showHome(true)
+            }
+        }
     }
 
     override fun onDestroy() {

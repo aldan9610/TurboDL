@@ -72,6 +72,7 @@
             android:name=".ui.BrowserActivity"
             android:exported="false"
             android:supportsPictureInPicture="true"
+            android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout" />
 
         <activity

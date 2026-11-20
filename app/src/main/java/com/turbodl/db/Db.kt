@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.turbodl.model.Task
 import java.util.ArrayList
 
-class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 2) {
+class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -18,18 +18,32 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 2) {
                 "headers TEXT, segs TEXT, extra TEXT, time INTEGER)"
         )
         db.execSQL(SQL_HISTORY)
+        db.execSQL(SQL_CREDS)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldV: Int, newV: Int) {
         // v2: historial de paginas del navegador
         if (oldV < 2) db.execSQL(SQL_HISTORY)
+        // v3: historial por usuario + credenciales cifradas
+        if (oldV < 3) {
+            try { db.execSQL("ALTER TABLE history ADD COLUMN user TEXT DEFAULT 'main'") } catch (e: Exception) { }
+            try { db.execSQL(SQL_CREDS) } catch (e: Exception) { }
+        }
     }
 
     companion object {
         private const val SQL_HISTORY =
             "CREATE TABLE history(" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-            "url TEXT, title TEXT, time INTEGER)"
+            "url TEXT, title TEXT, time INTEGER, user TEXT DEFAULT 'main')"
+
+        // credenciales de inicio de sesion (la contraseña via cifrada con
+        // Secrets: AES-256-GCM, clave en el AndroidKeyStore)
+        private const val SQL_CREDS =
+            "CREATE TABLE creds(" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "user TEXT, host TEXT, username TEXT, secret TEXT," +
+            "never INTEGER DEFAULT 0, time INTEGER)"
     }
 
     private fun cv(t: Task): ContentValues {
@@ -106,11 +120,12 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 2) {
     class HistRow(val id: Long, val url: String, val title: String, val time: Long)
 
     @Synchronized
-    fun addHistory(url: String, title: String) {
+    fun addHistory(url: String, title: String, user: String = "main") {
         if (url.isEmpty() || url.startsWith("data:")) return
         val v = ContentValues()
         v.put("url", url)
         v.put("title", title)
+        v.put("user", user)
         v.put("time", System.currentTimeMillis())
         writableDatabase.insert("history", null, v)
         // capamos a 500 entradas
@@ -120,11 +135,11 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 2) {
     }
 
     @Synchronized
-    fun history(limit: Int = 200): ArrayList<HistRow> {
+    fun history(limit: Int = 200, user: String = "main"): ArrayList<HistRow> {
         val out = ArrayList<HistRow>()
         val c = readableDatabase.rawQuery(
-            "SELECT id, url, title, time FROM history ORDER BY id DESC LIMIT ?",
-            arrayOf(limit.toString()))
+            "SELECT id, url, title, time FROM history WHERE user=? ORDER BY id DESC LIMIT ?",
+            arrayOf(user, limit.toString()))
         c.use {
             while (it.moveToNext()) {
                 out.add(HistRow(it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "", it.getLong(3)))
@@ -139,7 +154,81 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 2) {
     }
 
     @Synchronized
-    fun clearHistory() {
-        writableDatabase.delete("history", null, null)
+    fun clearHistory(user: String = "main") {
+        writableDatabase.delete("history", "user=?", arrayOf(user))
+    }
+
+    // ---------------- credenciales de inicio de sesion ----------------
+
+    class CredRow(val id: Long, val user: String, val host: String,
+                  val username: String, val secret: String, val never: Boolean)
+
+    @Synchronized
+    fun saveCred(user: String, host: String, username: String, secretEnc: String) {
+        // un par por host: reemplaza si ya existe para el mismo usuario+host
+        writableDatabase.delete("creds", "user=? AND host=?", arrayOf(user, host))
+        val v = ContentValues()
+        v.put("user", user)
+        v.put("host", host)
+        v.put("username", username)
+        v.put("secret", secretEnc)
+        v.put("never", 0)
+        v.put("time", System.currentTimeMillis())
+        writableDatabase.insert("creds", null, v)
+    }
+
+    @Synchronized
+    fun creds(user: String): ArrayList<CredRow> {
+        val out = ArrayList<CredRow>()
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,host,username,secret,never FROM creds WHERE user=? ORDER BY host",
+            arrayOf(user))
+        c.use {
+            while (it.moveToNext()) out.add(CredRow(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getString(3) ?: "", it.getString(4) ?: "", it.getInt(5) != 0))
+        }
+        return out
+    }
+
+    @Synchronized
+    fun findCred(user: String, host: String): CredRow? {
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,host,username,secret,never FROM creds WHERE user=? AND host=? LIMIT 1",
+            arrayOf(user, host))
+        c.use {
+            if (it.moveToFirst()) return CredRow(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getString(3) ?: "", it.getString(4) ?: "", it.getInt(5) != 0)
+        }
+        return null
+    }
+
+    @Synchronized
+    fun deleteCred(id: Long) {
+        writableDatabase.delete("creds", "id=?", arrayOf(id.toString()))
+    }
+
+    @Synchronized
+    fun setNeverCred(user: String, host: String) {
+        val v = ContentValues()
+        v.put("never", 1)
+        v.put("username", "")
+        v.put("secret", "")
+        v.put("time", System.currentTimeMillis())
+        val n = writableDatabase.update("creds", v, "user=? AND host=?", arrayOf(user, host))
+        if (n == 0) {
+            v.put("user", user)
+            v.put("host", host)
+            writableDatabase.insert("creds", null, v)
+        }
+    }
+
+    @Synchronized
+    fun neverFor(user: String, host: String): Boolean {
+        val c = readableDatabase.rawQuery(
+            "SELECT never FROM creds WHERE user=? AND host=? LIMIT 1", arrayOf(user, host))
+        c.use { if (it.moveToFirst()) return it.getInt(0) != 0 }
+        return false
     }
 }

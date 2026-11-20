@@ -398,7 +398,15 @@ class SettingsActivity : Activity() {
     }
 
     private fun clearHistory() {
-        eng.sp.edit().putString("history", "[]").apply()
+        // 4.0: el historial de búsqueda es por usuario (sandbox); se limpian
+        // todos los usuarios para que «limpiar» sea limpiar de verdad
+        val ids = ArrayList<String>()
+        ids.add("main")
+        try { com.turbodl.util.Users.list(this).forEach { ids.add(it.id) } } catch (e: Exception) { }
+        val e = eng.sp.edit()
+        ids.forEach { e.putString("history_$it", "[]") }
+        e.putString("history", "[]")
+        e.apply()
         toast("Historial de búsqueda borrado")
     }
 
@@ -706,7 +714,8 @@ class SettingsActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("¿Borrar todo el historial de páginas?")
             .setPositiveButton("Borrar") { _, _ ->
-                eng.db.clearHistory()
+                // 4.0: historial por usuario — se borra el del usuario activo
+                eng.db.clearHistory(com.turbodl.util.Users.active(this))
                 toast("Historial de páginas borrado")
             }
             .setNegativeButton("Cancelar", null)
