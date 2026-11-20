@@ -1,10 +1,122 @@
-# TurboDL 4.1.0
+# TurboDL 4.2.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.0 — crash al navegar arreglado, selector de bloqueadores, CRUD de notas y usuarios, visor de sandbox
+
+La 4.2.0 resuelve la ronda de incidencias que reportó el usuario: el cierre
+inesperado al navegar, las funcionalidades de notas y de cambio de usuario
+rotas, y la imposibilidad de elegir bloqueador o ver qué hay almacenado en
+cada sandbox.
+
+### 🐛 Crash al navegar (arreglado)
+Se diagnosticaron y arreglaron cinco causas de cierre inesperado:
+
+- **H1 — `WebView.setDataDirectorySuffix` mal defendido**: el catch era
+  `catch (e: Exception)` y no `Throwable`, y la segunda llamada (al cambiar
+  de usuario si el proceso no moría a tiempo) dejaba el sandbox inconsistente
+  y podía tirar la app. Ahora el sufijo se aplica de forma idempotente y
+  robusta, con un log si no se puede cambiar en caliente (sin crash).
+- **H2 — `ConcurrentModificationException` en `tabs`**: `shouldInterceptRequest`
+  (hilo de red) iteraba la lista `tabs` con `firstOrNull` mientras el hilo
+  UI la mutaba (`newTab`/`closeTab`). Ahora toda mutación e iteración pasa
+  por un `tabsLock` dedicado.
+- **H3 — `onCreateWindow` sin cancelar el `postDelayed`**: el `newTab` diferido
+  500 ms se ejecutaba tras `onDestroy` y revienta al tocar un `target=_blank`.
+  Ahora se usa un `Handler` compartido que se cancela en `onDestroy` y se
+  chequea `isFinishing`/`isDestroyed`.
+- **H4 — `handleExternalIntent` ejecutado dos veces**: tras exportar
+  `BrowserActivity` en 4.1.0, `onCreate` y `onNewIntent` podían procesar el
+  mismo intent. Ahora hay deduplicación por instancia y `load()` valida el
+  scheme (rechaza `javascript:`, `data:`, etc.) en vez de propagar
+  `IllegalArgumentException`.
+- **H7 — `offerCredSave` abría `AlertDialog` sin chequear `isFinishing`**:
+  si un formulario hacía submit justo al salir, `BadTokenException` mataba
+  la app. Ahora se chequea el estado de la Activity y `Secrets.encrypt` va
+  en try/catch.
+
+### 🛡 Selector de bloqueadores de anuncios (nuevo)
+Antes el motor cargaba solo EasyList + EasyPrivacy de forma fija. Ahora en
+**Ajustes → Listas de filtros** el usuario elige qué listas activar mediante
+un diálogo multi-choice, y se persiste en `SharedPreferences("cfg")`. La
+selección se aplica al guardar (descarga + recarga del motor en segundo
+plano). Catálogo disponible (todo 100 % Kotlin, sin código nativo):
+
+- **EasyList** y **EasyPrivacy** (easylist.to) — por defecto.
+- **AdGuard Base / Tracking / Annoyances** (`filters.adtidy.org`) — sintaxis
+  EasyList, alternativa y complemento a EasyList.
+- **Fanboy's Annoyances** (`fanboy.co.nz`) — banners de cookies, popups.
+- **EasyList Spanish** (regional).
+- **StevenBlack/hosts** (~80k hosts) — lista tipo `0.0.0.0 host`; se convierte
+  a sintaxis EasyList (`||host^`) en tiempo de carga mediante un adapter
+  puro Kotlin (`HostsAdapter`), sin tocar el motor.
+
+Cuantas más listas, más RAM usa el motor (≈0,5–4 MB cada una); se avisa al
+usuario en el diálogo. Hay botón "Restaurar por defecto" para volver a
+EasyList + EasyPrivacy.
+
+### 🗒 Notas — CRUD completo (arreglado)
+El CRUD básico ya existía en la BD pero fallaba en la UI:
+
+- **La lista no se refrescaba tras crear/editar** (sí tras eliminar) — el
+  usuario creaba una nota y no la veía. Ahora el editor recarga la lista al
+  cerrarse.
+- **Búsqueda en vivo** por título o cuerpo (la BD ya la soportaba pero no
+  se exponía). Caja de búsqueda en la cabecera de la vista de notas.
+- `editNote` usa `getNote(id)` en vez de releer toda la tabla.
+- Eliminar pide confirmación.
+
+### 👥 Usuarios sandbox — CRUD completo + borrado real (arreglado)
+- **Rename**: nuevo diálogo para renombrar un usuario existente (el id no
+  cambia, así que todo el sandbox se conserva). Antes solo se podía crear
+  y eliminar.
+- **Eliminar ahora borra de verdad**: `Users.remove` antes solo quitaba el
+  nombre de la lista JSON y los datos (cookies, localStorage, credenciales,
+  historial, marcadores, accesos) quedaban huérfanos en disco. Ahora borra
+  el directorio WebView del sandbox, las filas de `history`/`creds` en la
+  BD y las claves `bookmarks_$id`, `history_$id`, `sitesP{0,1,2}_$id` en
+  SharedPreferences. El diálogo informa de que el borrado es completo.
+- **`restartApp` con fallback**: si `getLaunchIntentForPackage` devuelve
+  null, no mata el proceso sin relanzar; cierra las tareas en su lugar.
+
+### 👁 Visor de sandbox (nuevo)
+En **menú → Privacidad → 👁 Sandbox** (o desde el diálogo de Usuarios),
+se abre un visor de solo lectura con todo lo almacenado en el sandbox del
+usuario activo:
+
+- 🍪 **Cookies** del WebView (CookieManager) — número de entradas y nombres.
+- 🗄 **localStorage** y 🗃 **IndexedDB** de la página activa (vía JS, solo si
+  hay una página http(s) cargada; en otro caso se informa de que no se
+  pueden inspeccionar sin una página abierta).
+- 🕘 **Historial de navegación** (tabla `history` filtrada por usuario).
+- 🔑 **Credenciales** guardadas + 🚫 hosts con "nunca preguntar" (tabla
+  `creds`).
+- ⭐ **Marcadores** y 📌 **accesos** (SharedPreferences namespaced por usuario).
+- 📂 **Ruta del sandbox en disco** y tamaño total.
+
+Todo es de solo lectura: para borrar hay que usar "Limpiar datos" o
+eliminar al usuario.
+
+### 📦 Internas
+- versionCode 16, versionName 4.2.0.
+- `AdblockCatalog.kt` (nuevo): catálogo de listas, persistencia de la
+  selección, validación de ids y URLs.
+- `HostsAdapter.kt` (nuevo): convierte listas tipo `0.0.0.0 host` a
+  sintaxis EasyList (`||host^`) en una pasada O(n) sin regex.
+- `Users.kt`: `applyDataDirSuffix` idempotente, `rename`, `remove` que
+  borra sandbox, `wipeSandbox`, `restartApp` con fallback.
+- `Db.kt`: `clearCreds(user)`, `historyCount`, `credsCount`, `neverCount`
+  para el visor de sandbox.
+- `NotesDb.kt`: `getNote(id)` para no releer toda la tabla.
+- `AdBlockEngine.java`: `init` y `updateLists` ahora usan el catálogo y el
+  adapter de hosts; el diagnóstico muestra las listas cargadas.
+- Tests unitarios nuevos: `HostsAdapterTest` (14 casos), `AdblockCatalogTest`
+  (13 invariantes), `UsersLogicTest` (3 invariantes). El build de debug y
+  todos los tests JVM pasan.
 
 ## Novedades de la 4.1.0 — bugs del navegador, Adblock Plus, registro en el sistema y tests
 

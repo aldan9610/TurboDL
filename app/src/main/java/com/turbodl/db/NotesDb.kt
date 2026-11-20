@@ -54,6 +54,18 @@ class NotesDb private constructor(ctx: Context) :
         writableDatabase.delete("notes", "id=?", arrayOf(id.toString()))
     }
 
+    /** Lee una sola nota por id (4.2: antes editNote releía toda la
+     *  lista con notes().firstOrNull; ahora va directo a la fila). */
+    @Synchronized fun getNote(id: Long): Note? {
+        val c = readableDatabase.rawQuery(
+            "SELECT id,title,body,url,time FROM notes WHERE id=?", arrayOf(id.toString()))
+        return c.use {
+            if (it.moveToFirst()) Note(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getString(3) ?: "", it.getLong(4)) else null
+        }
+    }
+
     @Synchronized fun notes(query: String = ""): ArrayList<Note> {
         val out = ArrayList<Note>()
         val c = if (query.isBlank())

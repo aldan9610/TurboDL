@@ -64,8 +64,10 @@ class SettingsActivity : Activity() {
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
         row("🛡 Bloqueador de anuncios",
             if (eng.sp.getBoolean("adblock", true)) "activado" else "desactivado") { toggleAdblock() }
+        row("📋 Listas de filtros",
+            com.turbodl.adblock.AdblockCatalog.summary(this)) { pickAdblockLists() }
         row("🚫 Exclusiones del bloqueador", exentoText()) { exentoManage() }
-        row("🔄 Actualizar listas de filtros (EasyList + EasyPrivacy)", adblockText()) { updateFilterLists() }
+        row("🔄 Actualizar listas de filtros", adblockText()) { updateFilterLists() }
         row("🖥 Modo escritorio por defecto",
             if (eng.sp.getBoolean("deskDefault", false)) "activado" else "desactivado") { toggleDesk() }
         row("🧹 Limpiar historial de búsqueda", "") { clearHistory() }
@@ -128,8 +130,10 @@ class SettingsActivity : Activity() {
     }
 
     private fun adblockText(): String = when {
-        com.turbodl.engine.AdBlockEngine.ready() -> "bloqueador Kotlin activo (EasyList + EasyPrivacy)"
-        com.turbodl.engine.AdBlockEngine.caido() -> "motor no disponible: lista básica de hosts"
+        com.turbodl.engine.AdBlockEngine.ready() ->
+            "motor activo · ${com.turbodl.adblock.AdblockCatalog.summary(this)}"
+        com.turbodl.engine.AdBlockEngine.caido() ->
+            "motor no disponible: lista básica de hosts"
         else -> "cargando motor…"
     }
 
@@ -696,6 +700,57 @@ class SettingsActivity : Activity() {
         val nv = !eng.sp.getBoolean("adblock", true)
         eng.sp.edit().putBoolean("adblock", nv).apply()
         buildUi()
+    }
+
+    /**
+     * 4.2: selector de listas de filtros (multi-choice). El usuario
+     * pedía poder elegir entre bloqueadores y añadir más. Las listas
+     * disponibles están en AdblockCatalog.ALL. La selección se persiste
+     * en SharedPreferences("cfg") clave "adblockLists"; al aceptar se
+     * reinicia el motor en segundo plano con la nueva selección.
+     */
+    private fun pickAdblockLists() {
+        val all = com.turbodl.adblock.AdblockCatalog.ALL
+        val selected = com.turbodl.adblock.AdblockCatalog.selectedIds(this)
+        val labels = all.map { e ->
+            val tag = if (e.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS) " (hosts)"
+                     else ""
+            "${e.name}$tag — ${e.desc}"
+        }.toTypedArray()
+        val checked = all.map { it.id in selected }.toBooleanArray()
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Listas de filtros (elige una o varias)")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                checked[which] = isChecked
+            }
+            .setPositiveButton("Guardar") { _, _ ->
+                val newSel = all.filterIndexed { i, _ -> checked[i] }.map { it.id }.toSet()
+                com.turbodl.adblock.AdblockCatalog.setSelectedIds(this, newSel)
+                toast("Reiniciando el motor con la nueva selección…")
+                // forzar recarga del motor con las nuevas listas
+                com.turbodl.engine.AdBlockEngine.updateLists(this) { ok, msg ->
+                    toast(if (ok) "Listas cargadas: $msg" else "Listas guardadas; $msg")
+                    buildUi()
+                }
+                buildUi()
+            }
+            .setNeutralButton("Restaurar por defecto") { _, _ ->
+                com.turbodl.adblock.AdblockCatalog.setSelectedIds(this,
+                    com.turbodl.adblock.AdblockCatalog.DEFAULT_IDS)
+                toast("Restauradas las listas por defecto (EasyList + EasyPrivacy)")
+                com.turbodl.engine.AdBlockEngine.updateLists(this) { _, _ -> buildUi() }
+                buildUi()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+        // nota informativa al pie del diálogo
+        val msg = TextView(this)
+        msg.text = "Las listas nuevas se descargan al guardar. Las tipo 'hosts' " +
+            "(StevenBlack) se convierten a sintaxis EasyList al cargar. " +
+            "Cuantas más listas, más RAM usa el motor (≈0,5–4 MB cada una)."
+        msg.textSize = 11f
+        msg.setPadding(40, 12, 40, 16)
+        (dlg.findViewById(android.R.id.content) as? android.view.ViewGroup)?.addView(msg)
     }
 
     private fun pickRetries() {

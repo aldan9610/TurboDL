@@ -1,4 +1,198 @@
-# TurboDL 4.1.0 — Notas de la versión
+# TurboDL 4.2.0 — Notas de la versión
+
+Fecha: 2026-11-20
+
+Esta versión resuelve los problemas que reportó el usuario tras la 4.1.0:
+el cierre inesperado al navegar, las funcionalidades de notas y de cambio
+de usuario rotas, la imposibilidad de elegir bloqueador de anuncios o de
+ver qué hay almacenado en cada sandbox de usuario.
+
+## 1. Crash al navegar (diagnóstico y arreglo)
+
+Se analizaron cinco causas potenciales de cierre inesperado y se
+arreglaron todas:
+
+### 1.1 H1 — `WebView.setDataDirectorySuffix` mal defendido
+- **Síntoma**: crash al cambiar de usuario o al abrir un enlace tras
+  haber cambiado de usuario.
+- **Causa raíz** (`app/src/main/java/com/turbodl/util/Users.kt:71-76`):
+  el `try/catch` atrapaba `Exception` (no `Throwable`); en Android 9+ la
+  segunda llamada a `setDataDirectorySuffix` en el mismo proceso lanza
+  `IllegalStateException`. Como `restartApp` a veces no mata el proceso a
+  tiempo y Android re-entra por `App.onCreate`, la segunda llamada dejaba
+  el sandbox inconsistente y podía tirar la app.
+- **Solución**: el sufijo se aplica de forma idempotente — si ya se aplicó
+  uno igual, no se llama de nuevo; si se aplicó uno distinto, se deja el
+  anterior con un `Log.w` (sin crash); el `try/catch` ahora es `Throwable`
+  para cubrir también `Error`. Se registra el sufijo aplicado en una var
+  estática `appliedSuffix`.
+
+### 1.2 H2 — `ConcurrentModificationException` en `tabs`
+- **Síntoma**: crash al cerrar una pestaña mientras una página está todavía
+  cargando subrecursos.
+- **Causa raíz** (`BrowserActivity.kt:2338-2400`): `shouldInterceptRequest`
+  corre en hilo de red e iteraba la lista `tabs` con `firstOrNull` (que
+  usa un iterator interno) mientras el hilo UI la mutaba con `newTab`/
+  `closeTab`.
+- **Solución**: toda mutación e iteración de `tabs` pasa por un
+  `tabsLock` (un `Any`). Se añaden helpers `snapshotTabs()` y
+  `currentTab()` para los accesos desde hilos de red. Las mutaciones en
+  `newTab`/`closeTab`/`switchTab`/`trimTabs`/`closeOthers`/`restoreTabs`/
+  `persistTabs` se envuelven en `synchronized(tabsLock)`; las operaciones
+  UI (attach, renderStrip, setText) se hacen fuera del lock.
+
+### 1.3 H3 — `onCreateWindow` sin cancelar el `postDelayed`
+- **Síntoma**: crash al tocar un enlace `target=_blank` y volver atrás.
+- **Causa raíz** (`BrowserActivity.kt:2433-2472`): el `newTab` diferido
+  500 ms no se cancelaba en `onDestroy` y no chequeaba `isFinishing`.
+- **Solución**: se introduce un `uiHandler` compartido; en `onDestroy`
+  se llama `uiHandler.removeCallbacksAndMessages(null)` y se destruyen
+  los WebViews temporales pendientes (`pendingTempWebViews`). El
+  `postDelayed` chequea `isFinishing`/`isDestroyed` antes de `newTab`.
+
+### 1.4 H4 — `handleExternalIntent` ejecutado dos veces
+- **Síntoma**: crash al abrir un enlace desde fuera de la app (Gmail,
+  WhatsApp…).
+- **Causa raíz** (`BrowserActivity.kt:695, 763-772`): tras exportar
+  `BrowserActivity` en 4.1.0 con `launchMode=singleTask`, el sistema
+  puede entregar `onNewIntent` justo después de `onCreate`, procesando el
+  mismo intent dos veces. Además `load()` no estaba en try/catch y una
+  URL inválida llegada por `ACTION_PROCESS_TEXT`/`WEB_SEARCH` lanzaba
+  `IllegalArgumentException`.
+- **Solución**: deduplicación por instancia de intent (`lastHandledIntent`);
+  `load()` valida el scheme con `isSafeWebUrl()` (admite http/https/file/
+  about/magnet) y se envuelve en try/catch.
+
+### 1.5 H7 — `offerCredSave` abría `AlertDialog` sin chequear `isFinishing`
+- **Síntoma**: crash si una página hacía submit de un formulario justo
+  al salir del navegador.
+- **Causa raíz** (`BrowserActivity.kt:451-470`): `AlertDialog.show()` sobre
+  una Activity no resumida lanza `BadTokenException`; `Secrets.encrypt`
+  tampoco estaba protegido y puede lanzar si el AndroidKeyStore no está
+  disponible.
+- **Solución**: se chequea `isFinishing || isDestroyed` al inicio;
+  `Secrets.encrypt` y `setNeverCred` van en try/catch con toast de error.
+
+## 2. Selector de bloqueadores de anuncios (nuevo)
+
+Antes el motor cargaba EasyList + EasyPrivacy de forma fija (arrays
+hardcoded en `AdBlockEngine.java`). Ahora:
+
+- **Catálogo** (`AdblockCatalog.kt`, nuevo): 8 listas con URL real,
+  formato (EasyList o hosts), descripción y tamaño aproximado.
+- **Selector UI** en Ajustes → "📋 Listas de filtros" — diálogo
+  `setMultiChoiceItems` con la descripción de cada lista y un aviso de
+  RAM. Botón "Restaurar por defecto".
+- **Persistencia** en `SharedPreferences("cfg")` clave `adblockLists`
+  como JSON array de ids. Si está vacío o no se ha elegido nada, se usa
+  el set por defecto (`{easylist, easyprivacy}`) para no romper
+  instalaciones existentes.
+- **Carga** en `AdBlockEngine.init` y `updateLists`: itera la selección
+  del catálogo, copia desde assets si la lista está embebida (easylist/
+  easyprivacy) o descarga la URL, y concatena. Las listas tipo hosts
+  pasan por `HostsAdapter.toEasyList()` que las convierte a `||host^`.
+- **Listas disponibles**:
+  - EasyList (`easylist.to/easylist/easylist.txt`)
+  - EasyPrivacy (`easylist.to/easylist/easyprivacy.txt`)
+  - AdGuard Base (`filters.adtidy.org/extension/ublock/filters/2.txt`)
+  - AdGuard Tracking (`filters.adtidy.org/.../3.txt`)
+  - AdGuard Annoyances (`filters.adtidy.org/.../14.txt`)
+  - Fanboy's Annoyances (`secure.fanboy.co.nz/fanboy-annoyance.txt`)
+  - EasyList Spanish (`easylist.to/easylistspanish/easylistspanish.txt`)
+  - StevenBlack/hosts (`raw.githubusercontent.com/StevenBlack/hosts/master/hosts`)
+- **Diagnóstico** del motor muestra las listas cargadas en lugar de
+  "EasyList + EasyPrivacy" fijo.
+
+## 3. Notas — CRUD completo (arreglado)
+
+El CRUD básico existía en la BD pero fallaba en la UI:
+
+- **La lista no se refrescaba tras crear/editar** (sí tras eliminar): el
+  usuario creaba una nota y no la veía al volver a la lista. Ahora el
+  editor recibe un callback `onSaved` que recarga la vista de notas.
+- **Búsqueda en vivo** por título o cuerpo: caja de búsqueda en la
+  cabecera; el `NotesDb.notes(query)` ya existía pero no se exponía.
+- `editNote` usa `NotesDb.getNote(id)` (nuevo) en vez de releer toda la
+  tabla con `notes().firstOrNull`.
+- Eliminar pide confirmación con `AlertDialog`.
+
+## 4. Usuarios sandbox — CRUD completo + borrado real (arreglado)
+
+- **Rename** (nuevo, `Users.rename`): completa el CRUD — antes solo se
+  podía crear y eliminar. El id no cambia, así que todo el sandbox
+  (cookies, history, creds, marcadores, accesos) se conserva.
+- **Eliminar ahora borra de verdad** (`Users.remove` + `wipeSandbox`):
+  antes solo se quitaba el nombre de la lista JSON y los datos quedaban
+  huérfanos. Ahora se borra:
+  - Directorio WebView del sandbox (`app_webview/usr_$id/`).
+  - Filas de `history` y `creds` con `user=?` en `turbodl.db` (lo hace el
+    llamador con `Db.clearHistory(id)` y `Db.clearCreds(id)`, nuevos).
+  - SharedPrefs `bookmarks_$id`, `history_$id`, `sitesP{0,1,2}_$id`.
+  El diálogo informa de que el borrado es completo.
+- **`restartApp` con fallback**: si `getLaunchIntentForPackage` devuelve
+  null, no mata el proceso sin relanzar; cierra las tareas con
+  `ActivityManager.appTasks.forEach { finishAndRemoveTask() }`.
+
+## 5. Visor de sandbox del usuario activo (nuevo)
+
+`showSandboxViewer()` en `BrowserActivity.kt`: diálogod e solo lectura
+accesible desde el menú del navegador (Privacidad → 👁 Sandbox) o desde
+el diálogo de Usuarios. Muestra:
+
+- 🍪 Cookies del WebView (CookieManager) — número de entradas y nombres.
+- 🗄 localStorage y 🗃 IndexedDB de la página activa (vía JS, solo si hay
+  una página http(s) cargada).
+- 🕘 Historial de navegación (tabla `history` filtrada por usuario).
+- 🔑 Credenciales guardadas + 🚫 hosts con "nunca preguntar" (tabla
+  `creds`; sin mostrar el secreto).
+- ⭐ Marcadores y 📌 accesos (SharedPreferences namespaced por usuario).
+- 📂 Ruta del sandbox en disco y tamaño total (`dirSize` recursivo).
+
+Todo es de solo lectura. Para borrar hay que usar "Limpiar datos" o
+eliminar/renombrar al usuario.
+
+## 6. Tests
+
+Nuevos tests unitarios JVM en `app/src/test/java/com/turbodl/`:
+
+- `adblock/HostsAdapterTest.kt`: 14 casos — conversión `0.0.0.0 host` →
+  `||host^`, descarte de localhost/comentarios, paso de selectores
+  cosméticos EasyList, CRLF/LF.
+- `adblock/AdblockCatalogTest.kt`: 13 invariantes — ids únicos, URLs
+  válidas, default en catálogo, presencia de AdGuard/Fanboy/StevenBlack.
+- `util/UsersLogicTest.kt`: 3 invariantes estáticas (sin Context) — id
+  "main", formato del sufijo `usr_$id`, generación de ids `u<…>`.
+
+El build de debug (`./gradlew assembleDebug`) y todos los tests JVM
+(`./gradlew testDebugUnitTest`) pasan.
+
+## 7. Compilación
+
+**Requisitos**: Android SDK Platform 34, Build Tools 34.0.0, JDK 17+.
+
+```bash
+cd /home/z/my-project/TurboDL
+export ANDROID_HOME=/home/z/android-sdk
+./gradlew --no-daemon assembleDebug
+# APK en app/build/outputs/apk/debug/TurboDL-4.2.0.apk
+```
+
+## 8. Verificación manual sugerida
+
+| Cambio | Cómo verificar |
+|---|---|
+| Crash al cambiar usuario | Crear usuario → cambiar a él → tocar un enlace → no debe crashear. |
+| Crash al cerrar pestaña | Abrir varias pestañas, abrir una página pesada → cerrar una pestaña mientras carga → no debe crashear. |
+| Crash al abrir enlace externo | Compartir un enlace desde Gmail → elegir TurboDL → no debe crashear. |
+| Selector de listas | Ajustes → Listas de filtros → activar AdGuard Base + StevenBlack → Guardar → Diagnóstico muestra las listas cargadas. |
+| Notas | Menú → Notas → crear una → volver a la lista: aparece. Buscar "algo": filtra. |
+| Usuarios rename | Menú → Usuarios → Renombrar → el nombre cambia y el id se conserva. |
+| Usuarios eliminar | Eliminar un usuario con datos → el directorio `app_webview/usr_<id>/` desaparece. |
+| Visor de sandbox | Menú → Sandbox → aparecen cookies, historial, creds, marcadores del usuario activo. |
+
+---
+
+# TurboDL 4.1.0 — Notas de la versión (histórico)
 
 Fecha: 2026-11-20
 

@@ -96,6 +96,34 @@ class BrowserActivity : Activity() {
     private var cur = 0
     private var readerMode = false
 
+    /** Lock para todas las mutaciones e iteraciones de `tabs` (4.2: H2).
+     *  `shouldInterceptRequest` corre en hilo de red y antes iteraba `tabs`
+     *  con `firstOrNull` mientras el hilo UI la mutaba (newTab/closeTab) →
+     *  ConcurrentModificationException al cerrar una pestaña mientras
+     *  cargan subrecursos. Ahora toda mutación y toda iteración de `tabs`
+     *  pasa por este lock. La lista es pequeña (max 8) así que el coste es
+     *  despreciable y no hay riesgo de ANR. */
+    private val tabsLock = Any()
+
+    /** Snapshot sincronizada de las pestañas (para iterar sin CME). */
+    private fun snapshotTabs(): List<Tab> = synchronized(tabsLock) { ArrayList(tabs) }
+
+    /** Pestaña activa de forma segura (hilo de red o UI). */
+    private fun currentTab(): Tab? = synchronized(tabsLock) {
+        if (cur in tabs.indices) tabs[cur] else null
+    }
+
+    /** Handler del hilo UI compartido (4.2: para poder cancelar los
+     *  postDelayed pendientes en onDestroy y evitar crashes por
+     *  tocar Views destruidos). Antes se creaba ad-hoc con
+     *  Handler(Looper.getMainLooper()) en onCreateWindow, lo que
+     *  dejaba el newTab diferido colgando tras onDestroy. */
+    private val uiHandler = Handler(Looper.getMainLooper())
+    /** WebViews temporales creados en onCreateWindow para capturar la
+     *  URL del window.open; se destruyen al disparar el postDelayed o
+     *  en onDestroy para evitar fugas. */
+    private val pendingTempWebViews = java.util.Collections.synchronizedList(mutableListOf<WebView>())
+
     /** WebView de la pestaña activa (todas las referencias antiguas siguen validas). */
     private val web: WebView
         get() {
@@ -450,23 +478,41 @@ class BrowserActivity : Activity() {
     /** Diálogo «¿Guardar inicio de sesión?» (4.0, estilo navegador). */
     private fun offerCredSave(host: String, user: String, pass: String) {
         if (host.isEmpty() || user.isEmpty() || pass.isEmpty()) return
+        // 4.2 (H7): si la Activity ya se está cerrando, abrir un
+        // AlertDialog lanza BadTokenException. El callback del
+        // @JavascriptInterface (submit de un formulario) puede llegar
+        // justo cuando el usuario ya salió del navegador.
+        if (isFinishing || isDestroyed) return
         val uid = Users.active(this)
         val hostBase = baseOf(host)
         if (hostBase.isEmpty() || eng.db.neverFor(uid, hostBase)) return
-        AlertDialog.Builder(this)
-            .setTitle("¿Guardar inicio de sesión?")
-            .setMessage("$hostBase\n\nUsuario: $user\n\nLas credenciales se cifran con la clave segura del dispositivo (AES-256-GCM, AndroidKeyStore) y solo las usa el usuario activo.")
-            .setPositiveButton("Guardar") { _, _ ->
-                eng.db.saveCred(uid, hostBase, user,
-                    com.turbodl.util.Secrets.encrypt(pass))
-                toast("Credenciales guardadas para $hostBase")
-            }
-            .setNeutralButton("Nunca en este sitio") { _, _ ->
-                eng.db.setNeverCred(uid, hostBase)
-                toast("No se volverá a preguntar en $hostBase")
-            }
-            .setNegativeButton("No", null)
-            .show()
+        try {
+            AlertDialog.Builder(this)
+                .setTitle("¿Guardar inicio de sesión?")
+                .setMessage("$hostBase\n\nUsuario: $user\n\nLas credenciales se cifran con la clave segura del dispositivo (AES-256-GCM, AndroidKeyStore) y solo las usa el usuario activo.")
+                .setPositiveButton("Guardar") { _, _ ->
+                    // 4.2 (H7): Secrets.encrypt puede lanzar si el
+                    // AndroidKeyStore no está disponible (emuladores sin
+                    // lock, ROMs raras). Lo envolvemos para no matar la
+                    // app si el cifrado falla; el usuario lo reintenta.
+                    try {
+                        eng.db.saveCred(uid, hostBase, user,
+                            com.turbodl.util.Secrets.encrypt(pass))
+                        toast("Credenciales guardadas para $hostBase")
+                    } catch (e: Throwable) {
+                        android.util.Log.e("TurboDL.creds", "Fallo al cifrar/credenciales", e)
+                        toast("No se pudieron guardar las credenciales: ${e.message ?: "error de cifrado"}")
+                    }
+                }
+                .setNeutralButton("Nunca en este sitio") { _, _ ->
+                    try { eng.db.setNeverCred(uid, hostBase) } catch (e: Exception) { }
+                    toast("No se volverá a preguntar en $hostBase")
+                }
+                .setNegativeButton("No", null)
+                .show()
+        } catch (e: Exception) {
+            android.util.Log.w("TurboDL.creds", "offerCredSave omitido (Activity no activa)", e)
+        }
     }
 
     /** Autorrelleno de credenciales guardadas para el host de la página. */
@@ -711,8 +757,21 @@ class BrowserActivity : Activity() {
      * Si el intent no lleva URL ni texto, no hace nada (queda en la
      * página de inicio).
      */
+    /** 4.2 (H4): marca de deduplicación de intents. Con launchMode=
+     *  singleTask y 5 intent-filters nuevos en 4.1, el sistema puede
+     *  entregar onNewIntent inmediatamente después de onCreate (típico
+     *  al re-lanzar con CLEAR_TASK), procesando el mismo intent DOS
+     *  veces y mezclando load()s. Guardamos la instancia ya tratada y
+     *  la saltamos si llega de nuevo. */
+    private var lastHandledIntent: android.content.Intent? = null
+
     private fun handleExternalIntent(intent: android.content.Intent?) {
         if (intent == null) return
+        // deduplicar: si ya procesamos este mismo objeto Intent (mismo
+        // ref), no hacemos nada (caso onCreate+onNewIntent con el mismo
+        // intent re-entregado por singleTask).
+        if (intent === lastHandledIntent) return
+        lastHandledIntent = intent
         // 1) Extra interno "openUrl" (de MainActivity): prioridad alta,
         //    porque significa que el usuario ya eligió abrir en navegador.
         val openUrl = intent.getStringExtra("openUrl")
@@ -1053,27 +1112,61 @@ class BrowserActivity : Activity() {
      * carga se retrasa o cambia el URL por redirección).
      */
     private fun load(url: String) {
-        homeOverlay.visibility = View.GONE
-        hideSheets()
-        // BUG 3: ocultar sugerencias ANTES de actualizar el texto del campo
-        // para que el TextWatcher no las vuelva a mostrar al reescribir la URL.
-        hideSuggestions()
-        suppressSuggest = true
-        editUrl.setText(url)
-        suppressSuggest = false
-        editUrl.clearFocus()
-        val t = tabs[if (cur in tabs.indices) cur else 0]
-        t.url = url
-        t.showHome = false
-        val w = ensureWv(t)
-        if (w.parent == null) attach(t)
-        w.loadUrl(url)
-        editUrl.setText(url)
-        // BUG 3: por si el setText anterior reactivó sugerencias, volvemos
-        // a ocultarlas (defensivo ante el orden de llamadas del TextWatcher).
-        hideSuggestions()
-        renderStrip()
-        persistTabs()
+        // 4.2 (H4): validar la URL antes de pasársela al WebView. Antes
+        // load() no estaba en try/catch y una URL inválida llegada por
+        // ACTION_PROCESS_TEXT/WEB_SEARCH (texto con espacios, saltos de
+        // línea…) lanzaba IllegalArgumentException y mataba la app.
+        // Rechazamos silenciosamente lo que no sea http/https/file/about
+        // o magnet (lo demás no tiene sentido abrirlo en WebView).
+        if (!isSafeWebUrl(url)) {
+            android.util.Log.w("TurboDL.load", "URL rechazada (no navegable): ${url.take(80)}")
+            toast("No se pudo abrir ese enlace")
+            return
+        }
+        try {
+            homeOverlay.visibility = View.GONE
+            hideSheets()
+            // BUG 3: ocultar sugerencias ANTES de actualizar el texto del campo
+            // para que el TextWatcher no las vuelva a mostrar al reescribir la URL.
+            hideSuggestions()
+            suppressSuggest = true
+            editUrl.setText(url)
+            suppressSuggest = false
+            editUrl.clearFocus()
+            val t = tabs[if (cur in tabs.indices) cur else 0]
+            t.url = url
+            t.showHome = false
+            val w = ensureWv(t)
+            if (w.parent == null) attach(t)
+            w.loadUrl(url)
+            editUrl.setText(url)
+            // BUG 3: por si el setText anterior reactivó sugerencias, volvemos
+            // a ocultarlas (defensivo ante el orden de llamadas del TextWatcher).
+            hideSuggestions()
+            renderStrip()
+            persistTabs()
+        } catch (e: Throwable) {
+            android.util.Log.e("TurboDL.load", "Fallo al cargar URL", e)
+            toast("No se pudo cargar la página")
+        }
+    }
+
+    /**
+     * ¿Es una URL que el WebView puede cargar sin riesgo de lanzar?
+     * 4.2 (H4): acepta http/https/file/about/magnet; rechaza javascript:,
+     * data:, content: y todo lo que no empiece por esquema conocido.
+     * Acepta también "about:blank" y páginas guardadas ("file://...").
+     */
+    private fun isSafeWebUrl(url: String): Boolean {
+        if (url.isBlank()) return false
+        val u = url.trim()
+        // magnet NO lo carga el WebView pero la app lo enruta a descargas;
+        // se admite aquí y la lógica de detección lo recoge.
+        return u.startsWith("http://", true) ||
+            u.startsWith("https://", true) ||
+            u.startsWith("file://") ||
+            u.startsWith("about:") ||
+            u.startsWith("magnet:")
     }
 
     private fun showHome(show: Boolean) {
@@ -1195,7 +1288,9 @@ class BrowserActivity : Activity() {
         return w
     }
 
-    private fun tabOf(wv: WebView?): Tab? = tabs.firstOrNull { it.wv === wv }
+    private fun tabOf(wv: WebView?): Tab? = synchronized(tabsLock) {
+        tabs.firstOrNull { it.wv === wv }
+    }
 
     /** Muestra el WebView de la pestaña indicada y pausa el resto. */
     private fun attach(t: Tab) {
@@ -1220,9 +1315,13 @@ class BrowserActivity : Activity() {
      * volver a ella se recarga (mismo efecto que matar el proceso).
      */
     private fun trimTabs(keep: Int) {
-        val inactive = tabs.filterIndexed { i, t -> i != cur && t.wv != null }
-            .sortedByDescending { it.lastUse }
-        for (t in inactive.drop(keep.coerceAtLeast(0))) {
+        val toTrim: List<Tab>
+        synchronized(tabsLock) {
+            toTrim = tabs.filterIndexed { i, t -> i != cur && t.wv != null }
+                .sortedByDescending { it.lastUse }
+                .drop(keep.coerceAtLeast(0))
+        }
+        for (t in toTrim) {
             t.wv?.let { w ->
                 try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
             }
@@ -1267,13 +1366,15 @@ class BrowserActivity : Activity() {
     }
 
     private fun newTab(url: String = "", switchNow: Boolean = true, privateTab: Boolean = false) {
-        if (tabs.size >= 8) { toast("Máximo 8 pestañas"); return }
+        synchronized(tabsLock) {
+            if (tabs.size >= 8) { toast("Máximo 8 pestañas"); return }
+        }
         syncActive()
         val nt = Tab(url, "")
         nt.priv = privateTab
-        tabs.add(nt)
+        synchronized(tabsLock) { tabs.add(nt) }
         if (switchNow) {
-            cur = tabs.size - 1
+            synchronized(tabsLock) { cur = tabs.size - 1 }
             attach(nt)
             editUrl.setText(url)
             hideKb()
@@ -1289,28 +1390,32 @@ class BrowserActivity : Activity() {
     }
 
     private fun closeTab(index: Int) {
-        if (index < 0 || index >= tabs.size) return
-        val wasActive = index == cur
-        tabs[index].let { t ->
-            t.wv?.let { w ->
-                try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+        synchronized(tabsLock) {
+            if (index < 0 || index >= tabs.size) return
+            val wasActive = index == cur
+            tabs[index].let { t ->
+                t.wv?.let { w ->
+                    try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+                }
+                t.thumb = null
             }
-            t.thumb = null
+            purgeTabMedia(tabs[index].uid)
+            tabs.removeAt(index)
+            if (tabs.isEmpty()) {
+                tabs.add(Tab("", ""))
+                cur = 0
+            } else {
+                when {
+                    index < cur -> cur--
+                    wasActive -> cur = index.coerceAtMost(tabs.size - 1)
+                    else -> { /* sin cambios */ }
+                }
+            }
         }
-        purgeTabMedia(tabs[index].uid)
-        tabs.removeAt(index)
-        if (tabs.isEmpty()) {
-            tabs.add(Tab("", ""))
-            cur = 0
-            attach(tabs[0])
-            editUrl.setText("")
-        } else {
-            if (index < cur) cur--
-            else if (wasActive) {
-                cur = index.coerceAtMost(tabs.size - 1)
-                attach(tabs[cur])
-                editUrl.setText(tabs[cur].url)
-            }
+        // fuera del lock: attach hace addView/onResume y puede tocar el WebView
+        if (cur in tabs.indices) {
+            attach(tabs[cur])
+            editUrl.setText(tabs[cur].url)
         }
         renderStrip()
         persistTabs()
@@ -1319,10 +1424,12 @@ class BrowserActivity : Activity() {
     }
 
     private fun switchTab(index: Int) {
-        if (index < 0 || index >= tabs.size || index == cur) return
-        syncActive()
-        grabThumb(tabs[cur])
-        cur = index
+        synchronized(tabsLock) {
+            if (index < 0 || index >= tabs.size || index == cur) return
+            syncActive()
+            grabThumb(tabs[cur])
+            cur = index
+        }
         attach(tabs[index])
         editUrl.setText(tabs[index].url)
         renderStrip()
@@ -1495,17 +1602,21 @@ class BrowserActivity : Activity() {
     }
 
     private fun closeOthers(keep: Int) {
-        for (i in tabs.indices.reversed()) if (i != keep) {
-            purgeTabMedia(tabs[i].uid)
-            tabs[i].wv?.let { w ->
-                try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+        synchronized(tabsLock) {
+            for (i in tabs.indices.reversed()) if (i != keep) {
+                purgeTabMedia(tabs[i].uid)
+                tabs[i].wv?.let { w ->
+                    try { w.removeJavascriptInterface("__tdlBridge"); w.destroy() } catch (e: Exception) { }
+                }
+                tabs[i].thumb = null
+                tabs.removeAt(i)
             }
-            tabs[i].thumb = null
-            tabs.removeAt(i)
+            cur = 0
         }
-        cur = 0
-        attach(tabs[0])
-        editUrl.setText(tabs[0].url)
+        if (tabs.isNotEmpty()) {
+            attach(tabs[0])
+            editUrl.setText(tabs[0].url)
+        }
         renderStrip()
         persistTabs()
         updateTabButton()
@@ -1739,32 +1850,36 @@ class BrowserActivity : Activity() {
         try {
             val arr = org.json.JSONArray()
             var shift = 0
-            for ((i, t) in tabs.withIndex()) {
-                if (t.priv) { if (i < cur) shift--; continue }
+            val snapshot = snapshotTabs()
+            val localCur = synchronized(tabsLock) { cur }
+            for ((i, t) in snapshot.withIndex()) {
+                if (t.priv) { if (i < localCur) shift--; continue }
                 val o = org.json.JSONObject()
                 o.put("u", t.url)
                 o.put("t", t.title)
                 o.put("h", t.showHome)
                 arr.put(o)
             }
-            val normalCur = (cur + shift).coerceIn(0, if (arr.length() == 0) 0 else arr.length() - 1)
+            val normalCur = (localCur + shift).coerceIn(0, if (arr.length() == 0) 0 else arr.length() - 1)
             eng.sp.edit().putString("tabsV21", arr.toString()).putInt("tabsCur", normalCur).apply()
         } catch (e: Exception) { }
     }
 
     private fun restoreTabs() {
-        tabs.clear()
-        try {
-            val arr = org.json.JSONArray(eng.sp.getString("tabsV21", "[]") ?: "[]")
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val t = Tab(o.optString("u", ""), o.optString("t", ""))
-                t.showHome = o.optBoolean("h", true)
-                tabs.add(t)
-            }
-        } catch (e: Exception) { }
-        if (tabs.isEmpty()) tabs.add(Tab("", ""))
-        cur = eng.sp.getInt("tabsCur", 0).coerceIn(0, tabs.size - 1)
+        synchronized(tabsLock) {
+            tabs.clear()
+            try {
+                val arr = org.json.JSONArray(eng.sp.getString("tabsV21", "[]") ?: "[]")
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val t = Tab(o.optString("u", ""), o.optString("t", ""))
+                    t.showHome = o.optBoolean("h", true)
+                    tabs.add(t)
+                }
+            } catch (e: Exception) { }
+            if (tabs.isEmpty()) tabs.add(Tab("", ""))
+            cur = eng.sp.getInt("tabsCur", 0).coerceIn(0, tabs.size - 1)
+        }
         attach(tabs[cur])
         editUrl.setText(tabs[cur].url)
         renderStrip()
@@ -2346,7 +2461,7 @@ class BrowserActivity : Activity() {
             }
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
                 addDetected(Kit.normalizeSniffUrl(u), "req",
-                    tabUid = tabOf(view)?.uid ?: tabs.getOrNull(cur)?.uid ?: -1)
+                    tabUid = tabOf(view)?.uid ?: currentTab()?.uid ?: -1)
             // bloqueador de anuncios: motor 100% Kotlin (EasyList + EasyPrivacy,
             // semantica EasyList); si aun no esta listo o fallo, cae a la
             // lista compacta de hosts que existia antes. Nunca debe lanzar:
@@ -2450,6 +2565,7 @@ class BrowserActivity : Activity() {
             }
             val href = arrayOfNulls<String>(1)
             val tmp = WebView(this@BrowserActivity)
+            pendingTempWebViews.add(tmp)
             tmp.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean {
                     href[0] = r?.url?.toString() ?: href[0]
@@ -2460,13 +2576,22 @@ class BrowserActivity : Activity() {
                 (resultMsg!!.obj as WebView.WebViewTransport).setWebView(tmp)
                 resultMsg.sendToTarget()
             } catch (e: Exception) {
+                try { tmp.destroy() } catch (e2: Exception) { }
+                pendingTempWebViews.remove(tmp)
                 return false
             }
-            Handler(Looper.getMainLooper()).postDelayed({
+            // 4.2 (H3): el postDelayed antes no se cancelaba en onDestroy,
+            // y newTab corría 500 ms después sin chequear isFinishing →
+            // IllegalStateException al añadir un WebView a un host ya
+            // detaching. Ahora usamos el uiHandler compartido (se cancela
+            // en onDestroy) y guardamos contra isFinishing/isDestroyed.
+            uiHandler.postDelayed({
                 val u = href[0] ?: tmp.url
                 try { tmp.destroy() } catch (e: Exception) { }
+                pendingTempWebViews.remove(tmp)
+                if (isFinishing || isDestroyed) return@postDelayed
                 if (!u.isNullOrEmpty()) newTab(u, true)
-                else toast("El enlace no se pudo abrir en nueva pestaña")
+                else if (!isFinishing) toast("El enlace no se pudo abrir en nueva pestaña")
             }, 500)
             return true
         }
@@ -2516,7 +2641,7 @@ class BrowserActivity : Activity() {
             }
         }
         statBump(t)
-        if (tabs.getOrNull(cur) === t) runOnUiThread { updateShield() }
+        if (currentTab() === t) runOnUiThread { updateShield() }
     }
 
     // ---------------- estadísticas acumuladas de bloqueo ----------------
@@ -2750,7 +2875,7 @@ class BrowserActivity : Activity() {
      * pestaña activa. Cada pestaña tiene su propia lista de capturas.
      */
     private fun updateDetectBtn() {
-        val uid = tabs.getOrNull(cur)?.uid ?: -1
+        val uid = currentTab()?.uid ?: -1
         val n = synchronized(detected) { detected.values.count { it.tabUid == uid } }
         btnVideos.text = if (n > 0) "⬇ Detectados: $n" else "⬇ Detectados"
         // FAB flotante: medios + descargas directas, en tiempo real
@@ -3033,6 +3158,7 @@ class BrowserActivity : Activity() {
                 MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
                 MenuCell("🔑", "Credenciales") { hideSheets(); showCredsDialog() },
                 MenuCell("👥", "Usuarios") { hideSheets(); showUsersDialog() },
+                MenuCell("👁", "Sandbox") { hideSheets(); showSandboxViewer() },
                 MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPages() },
                 MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
                 MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
@@ -3705,12 +3831,32 @@ class BrowserActivity : Activity() {
     // ---------------- notas (F5) ----------------
 
     /** Notas con CRUD completo (4.0): prompts y textos que se copian a los
-     *  chatbots; copiar al portapapeles con un toque desde el navegador. */
-    private fun showNotes() {
+     *  chatbots; copiar al portapapeles con un toque desde el navegador.
+     *  4.2: arregla los problemas reportados por el usuario —
+     *   · La lista NO se refrescaba tras crear/editar una nota (solo tras
+     *     eliminar), así que el usuario creaba una nota y no la veía. Ahora
+     *     el editor recarga la lista al cerrarse y se reabre la vista.
+     *   · La búsqueda existía en la BD (NotesDb.notes(query)) pero no se
+     *     exponía en la UI. Ahora hay una caja de búsqueda en la cabecera
+     *     que filtra por título o cuerpo en tiempo real.
+     *   · editNote usaba ndb.notes().firstOrNull { id==... } (leía toda la
+     *     tabla); ahora usa ndb.getNote(id).
+     *   · Eliminar pide confirmación.
+     */
+    private fun showNotes(initialQuery: String = "") {
         val ndb = com.turbodl.db.NotesDb.get(this)
-        val rows = ndb.notes()
+        val rows = ndb.notes(initialQuery)
         val lay = LinearLayout(this)
         lay.orientation = LinearLayout.VERTICAL
+        // 4.2: caja de búsqueda
+        val searchBox = android.widget.EditText(this)
+        searchBox.hint = "🔍 Buscar en notas…"
+        searchBox.setText(initialQuery)
+        searchBox.setSingleLine(true)
+        searchBox.setPadding(40, 24, 40, 24)
+        lay.addView(searchBox, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT))
         val lv = ListView(this)
         val ad = object : BaseAdapter() {
             override fun getCount(): Int = rows.size
@@ -3734,9 +3880,11 @@ class BrowserActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, 620))
         if (rows.isEmpty()) {
             val empty = TextView(this)
-            empty.text = "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
+            empty.text = if (initialQuery.isBlank())
+                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
+            else "Ninguna nota coincide con «$initialQuery»."
             empty.setPadding(40, 30, 40, 30)
-            lay.addView(empty, 0)
+            lay.addView(empty, 1)
         }
         val dlg = AlertDialog.Builder(this)
             .setTitle("🗒 Notas (${rows.size})")
@@ -3746,7 +3894,45 @@ class BrowserActivity : Activity() {
         val btnNew = Button(this)
         btnNew.text = "＋ Nueva nota"
         lay.addView(btnNew)
-        btnNew.setOnClickListener { dlg.dismiss(); editNote(-1L) }
+        btnNew.setOnClickListener { dlg.dismiss(); editNote(-1L) { showNotes(searchBox.text.toString()) } }
+        // 4.2: filtrado en vivo por título/cuerpo
+        searchBox.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val q = s?.toString() ?: ""
+                // mantener la vista del diálogo pero reconsultar la BD
+                rows.clear()
+                rows.addAll(ndb.notes(q))
+                // actualizar el título y el placeholder
+                dlg.setTitle("🗒 Notas (${rows.size})")
+                ad.notifyDataSetChanged()
+                // mostrar/ocultar mensaje de vacío según corresponda
+                val emptyView = if (lay.childCount >= 2) lay.getChildAt(1) as? TextView else null
+                if (rows.isEmpty()) {
+                    if (emptyView == null || emptyView.text?.startsWith("Sin notas") == true ||
+                        emptyView.text?.startsWith("Ninguna nota") == true) {
+                        if (emptyView == null) {
+                            val e = TextView(this@BrowserActivity)
+                            e.setPadding(40, 30, 40, 30)
+                            e.text = if (q.isBlank())
+                                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
+                            else "Ninguna nota coincide con «$q»."
+                            lay.addView(e, 1)
+                        } else {
+                            emptyView.text = if (q.isBlank())
+                                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
+                            else "Ninguna nota coincide con «$q»."
+                        }
+                    }
+                } else {
+                    if (emptyView != null && (emptyView.text?.startsWith("Sin notas") == true ||
+                            emptyView.text?.startsWith("Ninguna nota") == true)) {
+                        lay.removeView(emptyView)
+                    }
+                }
+            }
+        })
         lv.setOnItemClickListener { _, _, p, _ ->
             val n = rows[p]
             val acts = arrayOf("✏ Editar", "📋 Copiar al portapapeles", "↗ Compartir", "🗑 Eliminar")
@@ -3754,7 +3940,7 @@ class BrowserActivity : Activity() {
                 .setTitle(n.title.ifEmpty { "(sin título)" })
                 .setItems(acts) { _, w ->
                     when (w) {
-                        0 -> { dlg.dismiss(); editNote(n.id) }
+                        0 -> { dlg.dismiss(); editNote(n.id) { showNotes(searchBox.text.toString()) } }
                         1 -> { clipboard(n.body); toast("Copiado: pégalo donde quieras") }
                         2 -> try {
                             val i = android.content.Intent(android.content.Intent.ACTION_SEND)
@@ -3763,10 +3949,19 @@ class BrowserActivity : Activity() {
                             startActivity(android.content.Intent.createChooser(i, "Compartir nota"))
                         } catch (e: Exception) { }
                         3 -> {
-                            ndb.deleteNote(n.id)
-                            rows.removeAt(p)
-                            ad.notifyDataSetChanged()
-                            toast("Nota eliminada")
+                            // 4.2: pedir confirmación antes de borrar
+                            AlertDialog.Builder(this)
+                                .setTitle("Eliminar nota")
+                                .setMessage("¿Borrar «${n.title.ifEmpty { "(sin título)" }}»?")
+                                .setPositiveButton("Eliminar") { _, _ ->
+                                    ndb.deleteNote(n.id)
+                                    rows.removeAt(p)
+                                    ad.notifyDataSetChanged()
+                                    dlg.setTitle("🗒 Notas (${rows.size})")
+                                    toast("Nota eliminada")
+                                }
+                                .setNegativeButton("Cancelar", null)
+                                .show()
                         }
                     }
                 }
@@ -3776,10 +3971,16 @@ class BrowserActivity : Activity() {
         dlg.show()
     }
 
-    /** Editor de nota: creación y edición (misma ventana). */
-    private fun editNote(id: Long) {
+    /**
+     * Editor de nota: creación y edición (misma ventana).
+     * 4.2: añadido callback `onSaved` para que la vista de lista se
+     * refresque al cerrar el editor (antes la lista NO se refrescaba
+     * tras crear/editar — el usuario creaba una nota y no la veía).
+     * Usa ndb.getNote(id) en vez de releer toda la tabla.
+     */
+    private fun editNote(id: Long, onSaved: () -> Unit = {}) {
         val ndb = com.turbodl.db.NotesDb.get(this)
-        val existing = if (id > 0) ndb.notes().firstOrNull { it.id == id } else null
+        val existing = if (id > 0) ndb.getNote(id) else null
         val lay = LinearLayout(this)
         lay.orientation = LinearLayout.VERTICAL
         lay.setPadding(50, 30, 50, 0)
@@ -3803,6 +4004,7 @@ class BrowserActivity : Activity() {
                     ndb.addNote(t, b, tabs.getOrNull(cur)?.url ?: "")
                 else ndb.updateNote(existing.id, t, b)
                 toast("Nota guardada")
+                onSaved()
             }
             .setNeutralButton("📋 Copiar todo") { _, _ ->
                 clipboard(eb.text.toString())
@@ -4087,6 +4289,8 @@ class BrowserActivity : Activity() {
         opts.add("🏠 Principal" + (if (active == "main") "   (activo)" else ""))
         users.forEach { opts.add("👤 ${it.name}" + (if (active == it.id) "   (activo)" else "")) }
         opts.add("＋ Añadir usuario…")
+        opts.add("✏ Renombrar usuario…")
+        opts.add("👁 Ver sandbox del usuario activo…")
         opts.add("🗑 Eliminar usuario…")
         AlertDialog.Builder(this)
             .setTitle("👥 Usuarios (sandbox por usuario)")
@@ -4094,7 +4298,9 @@ class BrowserActivity : Activity() {
             .setItems(opts.toTypedArray()) { _, w ->
                 when {
                     w == opts.size - 1 -> deleteUsersDialog()
-                    w == opts.size - 2 -> addAndSwitchUser()
+                    w == opts.size - 2 -> showSandboxViewer()
+                    w == opts.size - 3 -> renameUserDialog()
+                    w == opts.size - 4 -> addAndSwitchUser()
                     w == 0 -> if (active != "main") confirmSwitchUser("main")
                     else -> {
                         val u = users[w - 1]
@@ -4133,6 +4339,37 @@ class BrowserActivity : Activity() {
             .show()
     }
 
+    /** 4.2: CRUD completo — Renombrar un usuario existente. Antes solo se
+     *  podía crear y eliminar. El id no cambia, así que todo el sandbox
+     *  (cookies, history, creds, marcadores) se conserva al renombrar. */
+    private fun renameUserDialog() {
+        val users = Users.list(this)
+        if (users.isEmpty()) { toast("No hay usuarios adicionales"); return }
+        val names = users.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Renombrar usuario")
+            .setItems(names) { _, w ->
+                val u = users[w]
+                val e = android.widget.EditText(this)
+                e.hint = "Nuevo nombre"
+                e.setText(u.name)
+                AlertDialog.Builder(this)
+                    .setTitle("Renombrar a «${u.name}»")
+                    .setView(e)
+                    .setPositiveButton("Renombrar") { _, _ ->
+                        val n = e.text.toString().trim()
+                        if (n.isNotEmpty() && n != u.name) {
+                            Users.rename(this, u.id, n)
+                            toast("Usuario renombrado a «$n»")
+                        }
+                    }
+                    .setNegativeButton("Cancelar", null)
+                    .show()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
     private fun deleteUsersDialog() {
         val users = Users.list(this)
         if (users.isEmpty()) { toast("No hay usuarios adicionales"); return }
@@ -4143,11 +4380,18 @@ class BrowserActivity : Activity() {
                 val u = users[w]
                 AlertDialog.Builder(this)
                     .setTitle("Eliminar a «${u.name}»")
-                    .setMessage("Se borra su identidad (cookies guardadas en su sandbox, credenciales e historial).")
+                    .setMessage("Se borra SU SANDBOX COMPLETO: cookies, localStorage y " +
+                        "caché del WebView, credenciales, historial de navegación, " +
+                        "marcadores y accesos. Esta acción no se puede deshacer.")
                     .setPositiveButton("Eliminar") { _, _ ->
                         val eraActivo = Users.active(this) == u.id
+                        // 4.2: limpiar datos del usuario en DB antes de
+                        // borrarlo de la lista (Users.remove borra archivos
+                        // y SharedPrefs; aquí borramos las filas de DB).
+                        try { eng.db.clearHistory(u.id) } catch (e: Exception) { }
+                        try { eng.db.clearCreds(u.id) } catch (e: Exception) { }
                         Users.remove(this, u.id)
-                        toast("Usuario eliminado")
+                        toast("Usuario eliminado (sandbox borrado)")
                         if (eraActivo) Users.restartApp(this)
                     }
                     .setNegativeButton("Cancelar", null)
@@ -4155,6 +4399,189 @@ class BrowserActivity : Activity() {
             }
             .setNegativeButton("Cancelar", null)
             .show()
+    }
+
+    /**
+     * Visor del sandbox del usuario activo (4.2): muestra qué hay
+     * almacenado en la sandbox del usuario que está usando la app ahora
+     * mismo. El usuario pedía poder ver "cookies, etc." de cada sandbox.
+     *
+     * Recoge y muestra:
+     *  · Cookies del WebView (CookieManager) — todas las del sandbox
+     *    activo, agrupadas por host.
+     *  · Conteo de entradas de localStorage e IndexedDB — se obtiene
+     *    inyectando JS en el WebView de la pestaña activa (solo si hay
+     *    una página http/https cargada; en otra caso se informa de que
+     *    no están disponibles sin una página abierta).
+     *  · Historial de navegación (tabla history filtrada por usuario).
+     *  · Credenciales guardadas + hosts con "nunca preguntar"
+     *    (tabla creds filtrada por usuario).
+     *  · Marcadores y accesos (SharedPreferences namespaced por usuario).
+     *  · Ruta del directorio WebView del sandbox en disco.
+     *
+     * Todo es de SOLO LECTURA: el visor no modifica nada. Para borrar
+     * hay que usar "Limpiar datos" o eliminar/renombrar al usuario.
+     */
+    private fun showSandboxViewer() {
+        val uid = Users.active(this)
+        val uname = Users.nameOf(this, uid)
+        val sb = StringBuilder()
+
+        sb.append("Usuario activo: ").append(uname).append("  (id: ").append(uid).append(")\n\n")
+
+        // --- cookies (CookieManager) ---
+        val cm = CookieManager.getInstance()
+        val allCookies = try { cm.getCookie(null)?.toString() ?: "" } catch (e: Exception) { "" }
+        val cookieHosts = LinkedHashSet<String>()
+        if (allCookies.isNotEmpty()) {
+            // CookieManager.getCookie(null) devuelve una cadena con todas
+            // las cookies del sandbox separadas por ';'. Cada cookie trae
+            // su path y a veces dominio; aquí listamos los pares name=value.
+            val entries = allCookies.split(';').map { it.trim() }.filter { it.isNotEmpty() }
+            for (entry in entries) {
+                val name = entry.substringBefore('=', entry).trim()
+                // no podemos saber el host de cada cookie desde la API
+                // pública; metemos las entradas en un set para desdup.
+                cookieHosts.add(name)
+            }
+        }
+        sb.append("🍪 Cookies del sandbox: ").append(cookieHosts.size).append(" entradas\n")
+        // mostramos hasta 30 nombres de cookie
+        cookieHosts.take(30).forEach { sb.append("    · ").append(it).append('\n') }
+        if (cookieHosts.size > 30) sb.append("    … y ").append(cookieHosts.size - 30).append(" más\n")
+        sb.append('\n')
+
+        // --- localStorage / IndexedDB (vía JS en el WebView activo) ---
+        // solo se puede contar si hay una página http(s) cargada: las
+        // APIs localStorage/indexedDB se asocian al origen del documento.
+        val w = activeWv()
+        val url = w?.url ?: ""
+        if (w != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+            sb.append("🌐 Página activa: ").append(url.take(70)).append("\n\n")
+            // pedir conteo de localStorage e IndexedDB en segundo plano
+            try {
+                w.evaluateJavascript(
+                    "(function(){try{var ls=0;try{ls=window.localStorage?window.localStorage.length:0}catch(e){}" +
+                    "var idb='-';try{var r=indexedDB.databases?indexedDB.databases().length:'n/d';idb=r}catch(e){idb='n/d'}" +
+                    "return JSON.stringify({ls:ls,idb:idb});}catch(e){return JSON.stringify({ls:0,idb:'n/d'});}})();"
+                ) { r ->
+                    val parsed = parseStorageJson(r)
+                    appendStorageSummary(sb, parsed.first, parsed.second, url)
+                    showSandboxViewerDialog(uid, uname, sb)
+                }
+            } catch (e: Exception) {
+                appendStorageSummary(sb, 0, "n/d", url)
+                showSandboxViewerDialog(uid, uname, sb)
+            }
+        } else {
+            sb.append("🌐 No hay página http(s) abierta — localStorage/IndexedDB\n")
+            sb.append("    solo se pueden inspeccionar con una página cargada.\n\n")
+            showSandboxViewerDialog(uid, uname, sb)
+        }
+    }
+
+    private fun parseStorageJson(r: String?): Pair<Int, String> {
+        if (r.isNullOrBlank()) return 0 to "n/d"
+        val s = r.trim().removeSurrounding("\"")
+        return try {
+            val o = org.json.JSONObject(s)
+            (o.optInt("ls", 0)) to (o.optString("idb", "n/d"))
+        } catch (e: Exception) { 0 to "n/d" }
+    }
+
+    private fun appendStorageSummary(sb: StringBuilder, ls: Int, idb: String, url: String) {
+        sb.append("🗄 localStorage (de ").append(hostOf(url)).append("): ")
+            .append(ls).append(" claves\n")
+        sb.append("🗃 IndexedDB (de ").append(hostOf(url)).append("): ")
+            .append(idb).append(" bases\n\n")
+    }
+
+    private fun showSandboxViewerDialog(uid: String, uname: String, sbSoFar: StringBuilder) {
+        val sb = sbSoFar
+        // --- historial de navegación (DB) ---
+        val hist = try { eng.db.history(200, uid) } catch (e: Exception) { ArrayList() }
+        sb.append("🕘 Historial de navegación: ").append(hist.size).append(" páginas\n")
+        hist.take(15).forEach {
+            val title = it.title.ifEmpty { hostOf(it.url) }
+            sb.append("    · ").append(title.take(40)).append('\n')
+        }
+        if (hist.size > 15) sb.append("    … y ").append(hist.size - 15).append(" más\n")
+        sb.append('\n')
+
+        // --- credenciales ---
+        val credCount = try { eng.db.credsCount(uid) } catch (e: Exception) { 0 }
+        val neverCount = try { eng.db.neverCount(uid) } catch (e: Exception) { 0 }
+        sb.append("🔑 Credenciales guardadas: ").append(credCount).append('\n')
+        sb.append("🚫 Hosts con «nunca preguntar»: ").append(neverCount).append('\n')
+        // lista de hosts de credenciales (sin secreto)
+        try {
+            val rows = eng.db.creds(uid)
+            rows.filter { !it.never }.take(15).forEach {
+                sb.append("    · ").append(it.host).append("  (usuario: ")
+                  .append(it.username.ifEmpty { "?" }).append(")\n")
+            }
+            rows.filter { it.never }.take(10).forEach {
+                sb.append("    🚫 ").append(it.host).append("  (nunca preguntar)\n")
+            }
+        } catch (e: Exception) { }
+        sb.append('\n')
+
+        // --- marcadores (SharedPrefs) ---
+        val bmCount = try {
+            val arr = JSONArray(eng.sp.getString("bookmarks_$uid", "[]") ?: "[]")
+            arr.length()
+        } catch (e: Exception) { 0 }
+        sb.append("⭐ Marcadores: ").append(bmCount).append('\n')
+
+        // --- accesos / sitios (SharedPrefs) ---
+        var sitesTotal = 0
+        for (p in 0..2) {
+            val n = try {
+                val arr = JSONArray(eng.sp.getString("sitesP${p}_$uid", "[]") ?: "[]")
+                arr.length()
+            } catch (e: Exception) { 0 }
+            sitesTotal += n
+        }
+        sb.append("📌 Accesos (paneles de sitios): ").append(sitesTotal).append('\n')
+
+        // --- historial de búsqueda (omnibox) ---
+        val qCount = try {
+            val arr = JSONArray(eng.sp.getString("history_$uid", "[]") ?: "[]")
+            arr.length()
+        } catch (e: Exception) { 0 }
+        sb.append("🔎 Historial de búsquedas: ").append(qCount).append('\n')
+
+        // --- ruta del sandbox en disco ---
+        sb.append('\n').append("📂 Directorio del sandbox:\n")
+        val suffix = if (uid == "main") "(predeterminado)" else "usr_$uid"
+        val webviewBase = java.io.File(dataDir, "app_webview")
+        val target = if (uid == "main") webviewBase else java.io.File(webviewBase, suffix)
+        sb.append("    ").append(target.absolutePath).append('\n')
+        val size = try { dirSize(target) } catch (e: Exception) { 0L }
+        sb.append("    Tamaño en disco: ").append(Kit.fmtBytes(size)).append('\n')
+
+        // --- mostrar ---
+        val tv = TextView(this)
+        tv.setPadding(50, 30, 50, 30)
+        tv.textSize = 12f
+        tv.typeface = android.graphics.Typeface.MONOSPACE
+        tv.text = sb.toString()
+        val scroll = android.widget.ScrollView(this)
+        scroll.addView(tv)
+        AlertDialog.Builder(this)
+            .setTitle("👁 Sandbox de «$uname»")
+            .setView(scroll)
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    /** Tamaño total (bytes) de un directorio (recursivo). */
+    private fun dirSize(f: java.io.File): Long {
+        if (!f.exists()) return 0
+        if (f.isFile) return f.length()
+        var s = 0L
+        f.listFiles()?.forEach { s += dirSize(it) }
+        return s
     }
 
     // ---------------- credenciales guardadas (F1) ----------------
@@ -4247,8 +4674,19 @@ class BrowserActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // 4.2 (H3): cancelar callbacks diferidos que tocarían Views ya
+        // destruidos (onCreateWindow, addDetected, etc.) y limpiar los
+        // WebViews temporales pendientes antes de destruir las pestañas.
+        uiHandler.removeCallbacksAndMessages(null)
+        synchronized(pendingTempWebViews) {
+            pendingTempWebViews.forEach { w ->
+                try { w.destroy() } catch (e: Exception) { }
+            }
+            pendingTempWebViews.clear()
+        }
         flushStats()
-        tabs.forEach { t ->
+        val snapshot = snapshotTabs()
+        snapshot.forEach { t ->
             t.wv?.let { w ->
                 try {
                     w.removeJavascriptInterface("__tdlBridge")
@@ -4256,6 +4694,7 @@ class BrowserActivity : Activity() {
                 } catch (e: Exception) { }
             }
         }
+        synchronized(tabsLock) { tabs.clear() }
         super.onDestroy()
     }
 

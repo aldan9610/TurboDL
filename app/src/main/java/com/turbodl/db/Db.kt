@@ -209,6 +209,39 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
         writableDatabase.delete("creds", "id=?", arrayOf(id.toString()))
     }
 
+    /** Borra TODAS las credenciales de un usuario (4.2: usado por
+     *  Users.remove para limpiar el sandbox al eliminar usuario). */
+    @Synchronized
+    fun clearCreds(user: String) {
+        writableDatabase.delete("creds", "user=?", arrayOf(user))
+    }
+
+    /** Número de entradas de historial de un usuario (4.2: visor de
+     *  sandbox; no devuelve las filas, solo el conteo para el resumen). */
+    @Synchronized
+    fun historyCount(user: String): Int {
+        val c = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM history WHERE user=?", arrayOf(user))
+        return c.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    }
+
+    /** Número de credenciales guardadas de un usuario (4.2: visor). */
+    @Synchronized
+    fun credsCount(user: String): Int {
+        val c = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM creds WHERE user=? AND never=0", arrayOf(user))
+        return c.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    }
+
+    /** Número de hosts en los que el usuario marcó "nunca preguntar"
+     *  (4.2: visor). */
+    @Synchronized
+    fun neverCount(user: String): Int {
+        val c = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM creds WHERE user=? AND never=1", arrayOf(user))
+        return c.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    }
+
     @Synchronized
     fun setNeverCred(user: String, host: String) {
         val v = ContentValues()

@@ -149,25 +149,67 @@ public final class AdBlockEngine {
         for (String legado : new String[]{"engine-full.bin", "engine-lite.bin", "mode.txt"}) {
             try { new File(d, legado).delete(); } catch (Throwable e) { }
         }
-        for (String n : LISTAS) {
-            File f = new File(d, n);
+        // 4.2: cargar las listas seleccionadas por el usuario desde el
+        // catálogo (AdblockCatalog). Si una lista no está en disco (primera
+        // vez o descarga fallida) y existe como asset embebido (easylist,
+        // easyprivacy), se copia desde assets; si no, se salta. Las listas
+        // tipo hosts pasan por HostsAdapter que las convierte a sintaxis
+        // EasyList (||host^) para que FilterEngine las entienda.
+        java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
+            com.turbodl.adblock.AdblockCatalog.selected(ctx);
+        StringBuilder sb = new StringBuilder();
+        int cargadas = 0;
+        for (com.turbodl.adblock.AdblockCatalog.Entry e : sel) {
+            File f = new File(d, e.id + ".txt");
+            // si la lista no existe en disco, intentamos copiarla desde
+            // assets (easylist y easyprivacy vienen embebidos en el APK).
             if (!f.exists() || f.length() < 1000) {
-                try (InputStream inp = ctx.getAssets().open("adblock/" + n);
+                try (InputStream inp = ctx.getAssets().open("adblock/" + e.id + ".txt");
                      OutputStream out = new FileOutputStream(f)) {
                     byte[] buf = new byte[64 * 1024];
                     int r;
                     while ((r = inp.read(buf)) > 0) out.write(buf, 0, r);
+                } catch (Throwable ex) {
+                    // no está embebida: se saltará si tampoco está descargada
                 }
             }
+            if (!f.exists() || f.length() < 1000) continue;
+            String content = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8);
+            // 4.2: si es formato hosts, convertir a EasyList
+            if (e.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS) {
+                content = com.turbodl.adblock.HostsAdapter.toEasyList(content);
+            }
+            sb.append(content);
+            sb.append('\n');
+            cargadas++;
+        }
+        // Si por la razón que sea ninguna lista se cargó (todas fallaron),
+        // caer a los assets clásicos easylist+easyprivacy si existen,
+        // para no dejar el motor vacío y romper el self-test.
+        if (cargadas == 0) {
+            for (String n : LISTAS) {
+                File f = new File(d, n);
+                if (!f.exists() || f.length() < 1000) {
+                    try (InputStream inp = ctx.getAssets().open("adblock/" + n);
+                         OutputStream out = new FileOutputStream(f)) {
+                        byte[] buf = new byte[64 * 1024];
+                        int r;
+                        while ((r = inp.read(buf)) > 0) out.write(buf, 0, r);
+                    } catch (Throwable ex) { }
+                }
+                if (!f.exists() || f.length() < 1000) continue;
+                sb.append(new String(java.nio.file.Files.readAllBytes(
+                    f.toPath()), java.nio.charset.StandardCharsets.UTF_8));
+                sb.append('\n');
+                cargadas++;
+            }
+        }
+        if (cargadas == 0) {
+            fallo(new Exception("no se pudo cargar ninguna lista de filtros"));
+            return;
         }
         FilterEngine eng = new FilterEngine();
-        StringBuilder sb = new StringBuilder();
-        int n = fullLists ? LISTAS.length : 1; // lite: solo EasyList
-        for (int i = 0; i < n; i++) {
-            sb.append(new String(java.nio.file.Files.readAllBytes(
-                new File(d, LISTAS[i]).toPath()), java.nio.charset.StandardCharsets.UTF_8));
-            sb.append('\n');
-        }
         boolean ok;
         try {
             ok = eng.parse(sb.toString()) > 0;
@@ -257,15 +299,27 @@ public final class AdBlockEngine {
             return sb.toString();
         }
         sb.append("- Sitios con bloqueo desactivado: ").append(exemptCount()).append('\n');
+        // 4.2: listas seleccionadas por el usuario
+        java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
+            com.turbodl.adblock.AdblockCatalog.selected(ctx);
+        if (sel.isEmpty()) {
+            sb.append("- Listas: ninguna seleccionada\n");
+        } else {
+            sb.append("- Listas (").append(sel.size()).append("): ");
+            for (int i = 0; i < sel.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(sel.get(i).name);
+            }
+            sb.append('\n');
+        }
         // 4.1: motor oficial Adblock Plus (libadblockplus-android).
         sb.append("- Motor oficial: ").append(AdblockPlusEngine.statusLine()).append('\n');
         // Motor 100% Kotlin (FilterEngine) — fallback.
         if (state == STATE_READY) {
             FilterEngine eng = engine;
-            sb.append("- Motor Kotlin (fallback): LISTO (")
-                .append(fullLists ? "EasyList + EasyPrivacy" : "solo EasyList");
-            if (eng != null) sb.append(", ").append(eng.getNetworkRules()).append(" reglas");
-            sb.append(")\n");
+            sb.append("- Motor Kotlin (fallback): LISTO");
+            if (eng != null) sb.append(" (").append(eng.getNetworkRules()).append(" reglas)");
+            sb.append('\n');
         } else if (state == STATE_FALLIDO) {
             sb.append("- Motor Kotlin (fallback): NO EN USO (")
                 .append(motivo == null || motivo.isEmpty() ? "no disponible" : motivo)
@@ -471,22 +525,34 @@ public final class AdBlockEngine {
     }
 
     /**
-     * Descarga listas frescas de easylist.to y reconstruye el motor.
-     * cb(ok, msg) llega en el hilo principal.
+     * Descarga las listas seleccionadas por el usuario (4.2: antes
+     * solo EasyList+EasyPrivacy) y reconstruye el motor. cb(ok, msg)
+     * llega en el hilo principal. Las listas tipo hosts también pasan
+     * por descarga + HostsAdapter al cargar (no al descargar).
      */
     public static void updateLists(Context ctx, Cb cb) {
         Thread t = new Thread(() -> {
             int okN = 0;
+            int totalN = 0;
             try {
                 File d = dir(ctx);
                 d.mkdirs();
-                for (int i = 0; i < LISTAS.length; i++) {
-                    if (descarga(URL_LISTAS[i], new File(d, LISTAS[i]))) okN++;
+                java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
+                    com.turbodl.adblock.AdblockCatalog.selected(ctx);
+                totalN = sel.size();
+                for (com.turbodl.adblock.AdblockCatalog.Entry e : sel) {
+                    File dest = new File(d, e.id + ".txt");
+                    // las listas tipo hosts no tienen cabecera [Adblock;
+                    // descarga las admite igual porque StevenBlack trae un
+                    // encabezado con [Adblock], pero si una futura no lo
+                    // trajera, la conversión de HostsAdapter añade la suya.
+                    if (descargaLista(e, dest)) okN++;
                 }
             } catch (Throwable e) { }
             final int okF = okN;
+            final int totalF = totalN;
             if (okF == 0) {
-                uiPost(() -> cb.on(false, "sin conexión con easylist.to"));
+                uiPost(() -> cb.on(false, "sin conexión o listas no accesibles"));
                 return;
             }
             try {
@@ -497,8 +563,8 @@ public final class AdBlockEngine {
                 init(ctx);
                 final boolean listo = ready();
                 uiPost(() -> cb.on(listo, listo
-                    ? "listas actualizadas (" + okF + " de 2)"
-                    : "el motor no pudo recargar"));
+                    ? "listas actualizadas (" + okF + " de " + totalF + ")"
+                    : "el motor no pudo recargar (las listas se guardaron)"));
             } catch (Throwable e) {
                 final String msg = e.getMessage() == null ? "error" : e.getMessage();
                 uiPost(() -> cb.on(false, msg));
@@ -506,6 +572,44 @@ public final class AdBlockEngine {
         });
         t.setDaemon(true);
         t.start();
+    }
+
+    /** Descarga una entrada del catálogo a su archivo. Para las listas
+     *  tipo hosts, valida solo tamaño mínimo (la cabecera [Adblock no
+     *  aparece en todas ellas). Para EasyList, exige la cabecera. */
+    private static boolean descargaLista(com.turbodl.adblock.AdblockCatalog.Entry e, File dest) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(e.url).openConnection();
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(20000);
+            conn.setRequestProperty("User-Agent", "TurboDL/4.2");
+            if (conn.getResponseCode() < 200 || conn.getResponseCode() > 299) return false;
+            File tmp = new File(dest.getParentFile(), dest.getName() + ".tmp");
+            try (InputStream in = conn.getInputStream();
+                 OutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[64 * 1024];
+                int r;
+                while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            }
+            if (tmp.length() < 5000) { tmp.delete(); return false; }
+            // validación: las EasyList deben tener [Adblock; las hosts no.
+            if (e.format == com.turbodl.adblock.AdblockCatalog.Format.EASYLIST) {
+                InputStream in = tmp.toURI().toURL().openStream();
+                byte[] head = new byte[200];
+                int n = in.read(head);
+                in.close();
+                String h = new String(head, 0, Math.max(0, n),
+                    java.nio.charset.StandardCharsets.UTF_8);
+                if (!h.contains("[Adblock")) { tmp.delete(); return false; }
+            }
+            if (dest.exists()) dest.delete();
+            return tmp.renameTo(dest);
+        } catch (Throwable ex) {
+            return false;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     private static void uiPost(Runnable f) {
