@@ -1,10 +1,103 @@
-# TurboDL 4.0.0
+# TurboDL 4.1.0
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.1.0 — bugs del navegador, Adblock Plus, registro en el sistema y tests
+
+La 4.1.0 corrige los cuatro bugs del navegador que reportó el usuario
+(menú inferior, swipe de accesos, sugerencias persistentes y barra de
+dirección), integra el motor de anuncios maduro de **Adblock Plus**
+(`libadblockplus-android`) con *fallback* automático al motor Kotlin
+existente, registra la app como **navegador del sistema** y como
+**gestor de descargas externo**, refactoriza `BrowserActivity` con
+constantes y nombres descriptivos, y añade tests unitarios e
+integración documentada.
+
+### 🐛 Bug 1 — El menú del navegador no se muestra correctamente
+No salían todos los botones del menú inferior y no se podía cambiar entre
+las tres páginas (Navegación · Herramientas · Privacidad). La causa era
+que `menuCell()` aplicaba los `GridLayout.LayoutParams` *después* de
+`addView` (nunca se aplicaban) y cada página medía todo el ancho del
+pager, desplazando las otras dos fuera de vista. Ahora `menuCell(col,row)`
+fija `columnSpec`/`rowSpec` *antes* de añadir la celda, cada GridLayout
+tiene ancho fijo igual al del pager, y los puntos de paginación se
+repintan al saltar.
+
+### 🐛 Bug 2 — Swipe de accesos rápidos roto
+El `HorizontalScrollView` de la página de inicio solo mostraba el primer
+panel ("Sitios comunes") y no deslizaba a "IA" ni "Mis sitios". La causa
+era que cada panel se añadía con `LayoutParams(MATCH_PARENT, …)` sobre un
+LinearLayout de ancho `wrap_content`, por lo que la primera página medía
+todo el ancho y las otras quedaban a 0. Ahora cada panel se crea con
+`LinearLayout.LayoutParams(panelWidth, MATCH_PARENT)` y se repinta en
+`post {}` si el pager aún no tenía ancho real.
+
+### 🐛 Bug 3 — Las sugerencias siguen saliendo tras buscar
+Tras pulsar Enter, el panel de sugerencias no se ocultaba y tapaba el
+WebView. El `setText(url)` de `load()` disparaba el `TextWatcher`, que
+reabría `showSuggestions()`. Ahora `load()` llama a `hideSuggestions()`
+antes y después de `setText`, `onPageStarted/onPageFinished` envuelven
+el `setText` con un flag `suppressSuggest`, y `showSuggestions(q)` añade
+un guard que oculta sugerencias si `q` coincide con la URL activa.
+
+### 🐛 Bug 4 — La URL no se limpia al tocar la barra
+Tras una búsqueda, tocar la barra no seleccionaba ni borraba la URL. El
+toque simple ahora ejecuta `selectAll()` + foco + teclado (siguiente
+carácter reemplaza, como Chrome/Firefox). La pulsación larga abre un
+menú contextual con **Compartir enlace**, **Copiar URL**, **Pegar y
+abrir** y **Editar URL (sin borrar)**.
+
+### 🛡 Bloqueador de anuncios: Adblock Plus + *fallback* Kotlin
+Se integra la librería oficial de Adblock Plus
+(`org.adblockplus:adblock-android:4.5.0` +
+`adblock-android-webview:4.5.0`) como motor primario. El motor 100 %
+Kotlin (`FilterEngine`, integrado en 3.6.0) se conserva como *fallback*
+automático: `AdBlockEngine.shouldBlock/cssFor/ruleFor` consultan primero
+al motor oficial y, si no está disponible o no está listo, caen al
+motor Kotlin y, si tampoco, a la lista compacta de hosts. El wrapper
+`AdblockPlusEngine.kt` carga `AdblockHelper` por reflexión, de modo que
+la app compila tanto si la AAR se resuelve como si no.
+
+### 🌐 Navegador registrado en el sistema Android
+`BrowserActivity` ahora es **exportada** y declara
+`ACTION_VIEW`+`BROWSABLE`+`http/https` (aparece en *Ajustes > Apps >
+Aplicaciones predeterminadas > Navegador*), `ACTION_SEND` con
+`text/plain` ("Compartir enlace → Abrir en TurboDL"),
+`ACTION_WEB_SEARCH` (asistente de Google) y `ACTION_PROCESS_TEXT`
+("Abrir en TurboDL" desde texto seleccionado). El nuevo `onNewIntent`
+procesa estos intents y carga la URL en una pestaña nueva.
+
+### 📥 Gestor de descargas para otras apps
+`MainActivity` refina el chooser de magnet/torrent con `ACTION_SEND`
+de `text/plain` (otras apps comparten un enlace y TurboDL lo añade a la
+cola) y `ACTION_VIEW` con `http/https` y `priority=1` (TurboDL aparece
+junto a BrowserActivity; al elegirla, el enlace se añade a la cola en
+lugar de abrirse en el navegador).
+
+### 🔧 Refactor y tests
+`BrowserActivity.kt` centraliza constantes en `companion object`
+(`COLOR_ACCENT`, `MENU_PAGE_COUNT`, `MENU_COLUMNS`, `SITES_PANEL_COUNT`,
+etc.), renombra variables de una letra (`q` → `query`, `u` → `url`) y
+documenta cada función. Se añaden tests unitarios JVM en
+`app/src/test/java/com/turbodl/` para paginación del menú, paneles de
+accesos, visibilidad de sugerencias, parsing de URL, tipos de recurso
+adblock, clasificación de medios y normalización de URLs sniffadas, más
+un documento de tests instrumentados para CI (`connectedDebugAndroidTest`).
+
+### 📦 Internas
+- versionCode 15, versionName 4.1.0.
+- `settings.gradle` añade los mirrors `https://maven.eyeo.com` y
+  `https://jcenter.bintray.com` (solo lectura) para resolver la AAR de
+  libadblockplus-android.
+- `proguard-rules.pro` añade `-keep` para `org.adblockplus.libadblockplus.**`
+  (JNI de V8 + libadblockplus).
+- Eliminado el árbol de fuentes duplicado `src/` suelto en la raíz
+  (reliquia del "rescate" del commit `32b8df7`); todo vive ahora bajo
+  `app/src/`.
 
 ## Novedades de la 4.0.0 — navegador estilo Via Browser: interfaz nueva, credenciales, usuarios y exportación
 
