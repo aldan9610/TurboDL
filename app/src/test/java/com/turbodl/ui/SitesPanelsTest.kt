@@ -5,105 +5,125 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tests unitarios de los paneles de accesos directos (Bug 2).
+ * Tests unitarios de los paneles de accesos directos (4.2.1).
  *
- * El home del navegador muestra 3 paneles (Comunes / IA / Mis sitios) en
- * un `HorizontalScrollView` con swipe horizontal. Estos tests blindan las
- * constantes `SITES_PANEL_COUNT`, `SITES_COLUMNS`, `SITES_ROWS_VISIBLE` y
- * la fórmula `panelActivo = round(scrollX / panelWidth)` para que un
- * cambio accidental no vuelva a dejar solo el primer panel visible.
+ * El home del navegador muestra 3 categorías (Comunes / IA / Mis sitios)
+ * repartidas en uno o varios sub-paneles paginados de 12 accesos (4×3).
+ * Estos tests blindan las constantes `SITES_CATEGORY_COUNT`,
+ * `SITES_COLUMNS`, `SITES_ROWS`, `SITES_PER_PAGE` y la fórmula del
+ * panel activo y del reparto en sub-paneles.
  *
  * No testeamos BrowserActivity directamente (requeriría Activity
  * Instrumented); probamos las constantes del companion object y la
- * fórmula de panel activo extraída.
+ * fórmula extraída del snap por página completa (4.2.1).
  */
 class SitesPanelsTest {
 
-    /** Fórmula exacta de `BrowserActivity` para el panel activo. */
+    /** Fórmula exacta del snap de `scheduleSitesSnap`: página destino =
+     *  round(scrollX / panelWidth), acotada al rango de sub-paneles. */
     private fun panelFromScroll(scrollX: Int, panelWidth: Int, panelCount: Int): Int {
         val w = panelWidth.coerceAtLeast(1)
-        return Math.round(scrollX / w.toFloat()).coerceIn(0, panelCount - 1)
+        return Math.round(scrollX / w.toFloat()).coerceIn(0, (panelCount - 1).coerceAtLeast(0))
+    }
+
+    /** Número de sub-paneles que ocupa una categoría con `n` accesos. */
+    private fun subPanelsFor(n: Int): Int =
+        if (n <= 0) 1 else (n + BrowserActivity.SITES_PER_PAGE - 1) / BrowserActivity.SITES_PER_PAGE
+
+    @Test
+    fun `SITES_CATEGORY_COUNT es 3 categorias`() {
+        assertEquals(3, BrowserActivity.SITES_CATEGORY_COUNT)
     }
 
     @Test
-    fun `SITES_PANEL_COUNT es 3 paneles`() {
-        assertEquals(3, BrowserActivity.SITES_PANEL_COUNT)
-    }
-
-    @Test
-    fun `SITES_COLUMNS es 4 columnas por panel`() {
+    fun `SITES_COLUMNS es 4 columnas por sub-panel`() {
         assertEquals(4, BrowserActivity.SITES_COLUMNS)
     }
 
     @Test
-    fun `SITES_ROWS_VISIBLE es 3 filas por panel`() {
-        assertEquals(3, BrowserActivity.SITES_ROWS_VISIBLE)
+    fun `SITES_ROWS es 3 filas por sub-panel`() {
+        assertEquals(3, BrowserActivity.SITES_ROWS)
     }
 
     @Test
-    fun `cada panel muestra 12 accesos (4 columnas x 3 filas)`() {
-        assertEquals(12, BrowserActivity.SITES_COLUMNS * BrowserActivity.SITES_ROWS_VISIBLE)
+    fun `SITES_PER_PAGE es 12 (4 columnas x 3 filas)`() {
+        assertEquals(12, BrowserActivity.SITES_PER_PAGE)
+        assertEquals(
+            BrowserActivity.SITES_COLUMNS * BrowserActivity.SITES_ROWS,
+            BrowserActivity.SITES_PER_PAGE
+        )
     }
 
     @Test
-    fun `scroll 0 corresponde al panel 0 (Sitios comunes)`() {
-        assertEquals(0, panelFromScroll(0, 1080, BrowserActivity.SITES_PANEL_COUNT))
+    fun `scroll 0 corresponde al sub-panel 0`() {
+        assertEquals(0, panelFromScroll(0, 1080, 4))
     }
 
     @Test
-    fun `scroll igual al ancho corresponde al panel 1 (IA)`() {
-        assertEquals(1, panelFromScroll(1080, 1080, BrowserActivity.SITES_PANEL_COUNT))
+    fun `scroll igual al ancho corresponde al sub-panel 1`() {
+        assertEquals(1, panelFromScroll(1080, 1080, 4))
     }
 
     @Test
-    fun `scroll doble corresponde al panel 2 (Mis sitios)`() {
-        assertEquals(2, panelFromScroll(2160, 1080, BrowserActivity.SITES_PANEL_COUNT))
+    fun `scroll doble corresponde al sub-panel 2`() {
+        assertEquals(2, panelFromScroll(2160, 1080, 4))
     }
 
     @Test
-    fun `scroll mayor que el total se acota al ultimo panel`() {
-        assertEquals(BrowserActivity.SITES_PANEL_COUNT - 1,
-            panelFromScroll(99999, 1080, BrowserActivity.SITES_PANEL_COUNT))
+    fun `scroll mayor que el total se acota al ultimo sub-panel`() {
+        assertEquals(3, panelFromScroll(99999, 1080, 4))
     }
 
     @Test
-    fun `scroll negativo se acota al panel 0`() {
-        assertEquals(0,
-            panelFromScroll(-200, 1080, BrowserActivity.SITES_PANEL_COUNT))
+    fun `scroll negativo se acota al sub-panel 0`() {
+        assertEquals(0, panelFromScroll(-200, 1080, 4))
     }
 
     @Test
     fun `panelWidth 0 no divide por cero (coerce a 1)`() {
-        assertEquals(0, panelFromScroll(0, 0, BrowserActivity.SITES_PANEL_COUNT))
+        assertEquals(0, panelFromScroll(0, 0, 4))
     }
 
     @Test
-    fun `los tres paneles son alcanzables con swipe horizontal`() {
-        // Bug 2: antes del fix, solo el panel 0 era visible porque los
-        // paneles 1 y 2 medían 0 de ancho. Aquí recorremos scrollX y
-        // comprobamos que los tres paneles se ven en algún momento.
-        val reached = HashSet<Int>()
-        for (sx in 0..(3 * 1080) step 50) {
-            reached.add(panelFromScroll(sx, 1080, BrowserActivity.SITES_PANEL_COUNT))
-        }
-        assertEquals(BrowserActivity.SITES_PANEL_COUNT, reached.size)
-        assertTrue("panel 0 (Comunes) debe alcanzarse", reached.contains(0))
-        assertTrue("panel 1 (IA) debe alcanzarse", reached.contains(1))
-        assertTrue("panel 2 (Mis sitios) debe alcanzarse", reached.contains(2))
+    fun `12 accesos = 1 sub-panel (sin desbordamiento)`() {
+        assertEquals(1, subPanelsFor(12))
     }
 
     @Test
-    fun `swipe entre paneles en pasos pequenos no salta de mas`() {
-        // Pequeños desplazamientos dentro del mismo panel no deben
-        // cambiar el panel activo (tolerancia del 50% de ancho).
+    fun `13 accesos = 2 sub-paneles (reparto automatico 4_2_1)`() {
+        // Lo que pediste: si no cabe en un panel, se añade otro panel en
+        // lugar de permitir scroll vertical interno.
+        assertEquals(2, subPanelsFor(13))
+        assertEquals(2, subPanelsFor(24))
+        assertEquals(3, subPanelsFor(25))
+        assertEquals(3, subPanelsFor(36))
+        assertEquals(4, subPanelsFor(37))
+    }
+
+    @Test
+    fun `0 accesos = 1 sub-panel (panel vacio visible)`() {
+        assertEquals(1, subPanelsFor(0))
+    }
+
+    @Test
+    fun `swipe entre sub-paneles en pasos pequenos no salta de mas`() {
         for (sx in 0..539) {
-            assertEquals(0, panelFromScroll(sx, 1080, BrowserActivity.SITES_PANEL_COUNT))
+            assertEquals(0, panelFromScroll(sx, 1080, 4))
         }
         for (sx in 540..1619) {
-            assertEquals(1, panelFromScroll(sx, 1080, BrowserActivity.SITES_PANEL_COUNT))
+            assertEquals(1, panelFromScroll(sx, 1080, 4))
         }
-        for (sx in 1620..2160) {
-            assertEquals(2, panelFromScroll(sx, 1080, BrowserActivity.SITES_PANEL_COUNT))
+        for (sx in 1620..2699) {
+            assertEquals(2, panelFromScroll(sx, 1080, 4))
         }
+    }
+
+    @Test
+    fun `MENU_PAGE_COUNT sigue siendo 3 paginas (snap del menu 4_2_1)`() {
+        assertEquals(3, BrowserActivity.MENU_PAGE_COUNT)
+        assertEquals(5, BrowserActivity.MENU_COLUMNS)
+        assertEquals(2, BrowserActivity.MENU_ROWS)
+        // Cada página del menú sigue cabiendo en 10 celdas (5×2).
+        assertEquals(10, BrowserActivity.MENU_COLUMNS * BrowserActivity.MENU_ROWS)
     }
 }

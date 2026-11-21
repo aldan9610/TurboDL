@@ -165,12 +165,19 @@ class BrowserActivity : Activity() {
         internal const val MENU_ROWS = 2
 
         // ---------------- paneles de accesos directos (4.0) ----------------
-        /** Número de paneles de accesos (Comunes / IA / Mis sitios). */
-        internal const val SITES_PANEL_COUNT = 3
+        /** Número de CATEGORÍAS de accesos (Comunes / IA / Mis sitios).
+         *  Cada categoría se reparte en uno o varios sub-paneles visibles
+         *  según SITES_PER_PAGE (4.2.1). */
+        internal const val SITES_CATEGORY_COUNT = 3
         /** Columnas de cada panel de accesos (4 por fila, estilo launchador). */
         internal const val SITES_COLUMNS = 4
-        /** Filas visibles por panel antes de scroll vertical. */
-        internal const val SITES_ROWS_VISIBLE = 3
+        /** Filas visibles por panel (sin scroll vertical: si una categoría
+         *  supera SITES_COLUMNS*SITES_ROWS por panel, se desborda a otro
+         *  sub-panel en lugar de hacer scroll interno). */
+        internal const val SITES_ROWS = 3
+        /** Accesos por sub-panel = 4 × 3 = 12. Si una categoría tiene más,
+         *  sus accesos se reparten en varios sub-paneles paginados. */
+        internal const val SITES_PER_PAGE = SITES_COLUMNS * SITES_ROWS
 
         private val MEDIA_RE = Regex(
             "\\.(m3u8|mpd|mp4|webm|mov|m4s|mp3|aac|m4a|ogg|opus|flac|wav|avi|flv|mkv)(\\?|$)",
@@ -434,15 +441,23 @@ class BrowserActivity : Activity() {
     private lateinit var menuPages: LinearLayout
     private lateinit var menuDots: LinearLayout
     private var menuPage = 0
-    // paneles de accesos (4.0): swipe entre Sitios comunes / IA / Mis sitios
+    private var menuSnapBusy = false   // 4.2.1: evita reentrancia en el snap del menú
+    // paneles de accesos (4.0): swipe entre Sitios comunes / IA / Mis sitios.
+    // 4.2.1: cada categoría se reparte en 1+ sub-paneles (12 accesos c/u),
+    // sin scroll vertical interno; el número total es dinámico.
     private lateinit var sitesPager: HorizontalScrollView
     private lateinit var sitesPages: LinearLayout
     private lateinit var sitesDots: LinearLayout
     private lateinit var txtSitesTitle: TextView
     private lateinit var btnEditSites: Button
     private lateinit var fab: Button
-    private var sitesPage = 0
+    private var sitesPage = 0          // sub-panel visible actualmente
+    private var sitesSnapBusy = false  // 4.2.1: evita reentrancia en el snap
     private var editSites = false
+    /** Sub-paneles activos: cada entrada dice a qué categoría (0..2) pertenece
+     *  y qué "página" dentro de esa categoría es (0-based). Lo construye
+     *  buildSitesPanels() a partir del contenido de cada categoría. */
+    private val sitesPanelMap = ArrayList<IntArray>()
     // descargas directas detectadas por el DownloadListener (además del sniffing)
     private val downloadEvents = LinkedHashMap<String, Long>()
     @Volatile private var suppressSuggest = false
@@ -601,12 +616,17 @@ class BrowserActivity : Activity() {
         findViewById<Button>(R.id.btnResetSites).setOnClickListener {
             AlertDialog.Builder(this)
                 .setTitle("Restaurar accesos")
-                .setMessage("Vuelven a su estado inicial los tres paneles (Sitios comunes, Inteligencia artificial y Mis sitios). ¿Continuar?")
+                .setMessage("Vuelven a su estado inicial los tres paneles (Sitios comunes, Inteligencia artificial y Mis sitios) y se restauran sus títulos. ¿Continuar?")
                 .setPositiveButton("Restaurar") { _, _ ->
                     val u = Users.active(this)
                     eng.sp.edit()
                         .remove("sitesP0_$u").remove("sitesP1_$u")
-                        .remove("sitesP2_$u").putString("sites", "[]").apply()
+                        .remove("sitesP2_$u").putString("sites", "[]")
+                        // 4.2.1: restaurar también los títulos renombrados.
+                        .remove("siteTitle0_$u")
+                        .remove("siteTitle1_$u")
+                        .remove("siteTitle2_$u")
+                        .apply()
                     buildSitesPanels()
                     toast("Accesos restaurados")
                 }
@@ -707,15 +727,42 @@ class BrowserActivity : Activity() {
         }
         // 4.0 U5: FAB de descargas detectadas con contador en tiempo real
         fab.setOnClickListener { showDetectChooser() }
-        // 4.0 U9: título del panel activo al deslizar los accesos
+        // 4.2.1: título del panel activo al deslizar los accesos (snap por
+        // página completa). El OnScrollChangeListener sólo actualiza el
+        // indicador y el título en tiempo real; el snap a la página más
+        // cercana se dispara al soltar el dedo (OnTouchListener).
         sitesPager.setOnScrollChangeListener { _, sx, _, _, _ ->
             val w = sitesPager.width.coerceAtLeast(1)
-            val np = Math.round(sx / w.toFloat()).coerceIn(0, SITES_PANEL_COUNT - 1)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0,
+                (sitesPanelMap.size - 1).coerceAtLeast(0))
             if (np != sitesPage) {
                 sitesPage = np
                 renderSitesDots()
                 updateSitesTitle()
             }
+        }
+        sitesPager.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    // 4.2.1 (U9): snap a la página más cercana al soltar el
+                    // dedo. Sin esto el pager quedaba entre dos páginas
+                    // (scroll fluido). El umbral es la mitad de la página;
+                    // si se desplazó más, salta a la siguiente/previa.
+                    scheduleSitesSnap()
+                }
+            }
+            false   // no consumir: deja que el ScrollView haga su fling
+        }
+        // 4.2.1: pulsación larga sobre el título del panel → renombrar la
+        // categoría activa. (También accesible desde el menú contextual de
+        // cada celda: "Renombrar este panel".)
+        txtSitesTitle.setOnLongClickListener {
+            if (sitesPanelMap.isNotEmpty()) {
+                val (cat, _) = sitesPanelMap[sitesPage.coerceIn(0, sitesPanelMap.size - 1)]
+                renamePanelTitle(cat)
+                true
+            } else false
         }
         // 4.0 U3: página activa del menú al deslizar
         menuPager.setOnScrollChangeListener { _, sx, _, _, _ ->
@@ -725,6 +772,14 @@ class BrowserActivity : Activity() {
                 menuPage = np
                 renderMenuDots()
             }
+        }
+        // 4.2.1: snap por página completa también en el menú.
+        menuPager.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> scheduleMenuSnap()
+            }
+            false
         }
 
         readerMode = eng.sp.getBoolean("readerMode", false)
@@ -1068,6 +1123,9 @@ class BrowserActivity : Activity() {
         if (l.any { it.substringAfter('|') == u }) { toast("Ya está en tus accesos"); return }
         l.add("$name|$u")
         savePanel(2, l)
+        // 4.2.1: refrescar el paginador para que aparezca la nueva celda
+        // (si llena el sub-panel actual o abre otro, se rehacen los puntos).
+        buildSitesPanels()
         toast("Añadido a «Mis sitios»")
     }
 
@@ -1970,7 +2028,42 @@ class BrowserActivity : Activity() {
     // Cada panel reordena por arrastre en modo edición; los iconos son el
     // favicon real del sitio (caché en disco) o un monograma por dominio.
 
-    private val PANEL_TITLES = arrayOf("Sitios comunes", "Inteligencia artificial", "Mis sitios")
+    /** Títulos por defecto de las 3 categorías. El usuario puede renombrarlos
+     *  con una pulsación larga sobre el título del panel (4.2.1); el nombre
+     *  personalizado se guarda por usuario activo en `siteTitleN_<user>`. */
+    private val PANEL_TITLES_DEFAULT = arrayOf("Sitios comunes", "Inteligencia artificial", "Mis sitios")
+
+    /** Título actual de la categoría `panel` (por defecto o el renombrado). */
+    private fun panelTitle(panel: Int): String =
+        eng.sp.getString("siteTitle${panel}_" + Users.active(this), null)
+            ?.takeIf { it.isNotBlank() } ?: PANEL_TITLES_DEFAULT[panel]
+
+    /** Renombra una categoría de accesos y refresca el título visible. */
+    private fun renamePanelTitle(panel: Int) {
+        if (panel < 0 || panel >= SITES_CATEGORY_COUNT) return
+        val e = android.widget.EditText(this)
+        e.setText(panelTitle(panel))
+        e.setSingleLine(true)
+        AlertDialog.Builder(this)
+            .setTitle("Renombrar panel")
+            .setMessage("Nombre que aparece sobre los accesos de esta categoría.")
+            .setView(e)
+            .setPositiveButton("Guardar") { _, _ ->
+                val n = e.text.toString().trim()
+                if (n.isNotEmpty()) {
+                    eng.sp.edit().putString("siteTitle${panel}_" + Users.active(this), n).apply()
+                    updateSitesTitle()
+                    toast("Panel renombrado")
+                }
+            }
+            .setNegativeButton("Restaurar") { _, _ ->
+                eng.sp.edit().remove("siteTitle${panel}_" + Users.active(this)).apply()
+                updateSitesTitle()
+                toast("Título restaurado")
+            }
+            .setNeutralButton("Cancelar", null)
+            .show()
+    }
 
     private fun panelKey(panel: Int): String = "sitesP${panel}_" + Users.active(this)
 
@@ -2015,98 +2108,143 @@ class BrowserActivity : Activity() {
     }
 
     /**
-     * Construye los paneles de accesos directos (Comunes / IA / Mis sitios)
-     * dentro del `HorizontalScrollView sitesPager`.
+     * Construye los paneles de accesos directos (4.0; reescrito 4.2.1).
      *
-     * BUG 2 (informado por el usuario): "no se puede hacer swipe de los
-     * accesos rápidos ni estos muestran las páginas". Causa raíz: cada
-     * panel se añadía a `sitesPages` (LinearLayout horizontal cuyo propio
-     * ancho es `wrap_content`) con `LayoutParams(MATCH_PARENT, …)`. La
-     * primera página medía todo el ancho del pager y desplazaba a las dos
-     * siguientes fuera de vista (ancho 0). El swipe quedaba "atascado"
-     * porque solo existía una página visible.
+     * 4.2.1 — Lo que pediste:
+     *  · Swipe por página completa (no scroll fluido): se suelta el dedo y
+     *    la página "encaja" en la más cercana (snap), como un libro de
+     *    páginas enteras. Implementado con OnTouchListener + post-scroll
+     *    al levantar el dedo; sin dependencias externas (ViewPager2).
+     *  · Sin desbordamiento: cada sub-panel muestra exactamente
+     *    SITES_PER_PAGE = 4 columnas × 3 filas = 12 accesos, en un
+     *    GridLayout con peso 1f por celda. Si una categoría tiene más de
+     *    12 accesos, se reparte en 2+ sub-paneles paginados (no hay scroll
+     *    vertical interno). Si tiene menos, las celdas vacías simplemente
+     *    quedan en blanco pero la rejilla sigue midiendo lo mismo.
+     *  · Título del panel editable: pulsación larga sobre el título
+     *    (txtSitesTitle) abre el diálogo de renombrar la categoría activa.
      *
-     * Solución: cada panel se crea con un LayoutParams de ancho fijo igual
-     * al ancho del pager (en el primer render el pager aún no se ha
-     * medido, así que usamos el ancho de pantalla como fallback y
-     * repintamos en un `post {}`). Con esto las tres páginas se ven y se
-     * deslizan correctamente entre sí.
+     * BUG 2 (4.0, ya resuelto): cada panel se añadía con
+     * LayoutParams(MATCH_PARENT) dentro de un LinearLayout wrap_content, así
+     * que la primera página se "comía" el ancho y las dos siguientes medían 0.
+     * Se sigue usando ancho fijo = ancho del pager.
      */
     private fun buildSitesPanels() {
         sitesPages.removeAllViews()
-        // Ancho fijo de cada panel: si el pager ya se midió, usamos su
+        sitesPanelMap.clear()
+        // Ancho fijo de cada sub-panel: si el pager ya se midió, usamos su
         // ancho real; si no, el ancho de pantalla. Se repinta tras medir.
         val panelWidth = sitesPager.width.takeIf { it > 0 }
             ?: resources.displayMetrics.widthPixels
-        for (p in 0 until SITES_PANEL_COUNT) {
-            val page = LinearLayout(this)
-            page.orientation = LinearLayout.VERTICAL
-            // LayoutParams del panel dentro del LinearLayout horizontal:
-            // ancho fijo = ancho del pager (igual que el menú), alto = padre.
-            val pageLp = LinearLayout.LayoutParams(panelWidth, ViewGroup.LayoutParams.MATCH_PARENT)
-            page.layoutParams = pageLp
-            val gv = GridView(this)
-            gv.numColumns = SITES_COLUMNS
-            gv.horizontalSpacing = dp(6)
-            gv.verticalSpacing = dp(6)
-            gv.setPadding(dp(8), dp(4), dp(8), dp(8))
-            gv.adapter = sitesAdapter(p)
-            page.addView(gv, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            sitesPages.addView(page)
-            gv.setOnItemClickListener { _, _, pos, _ -> openSite(p, pos) }
-            gv.setOnItemLongClickListener { _, v, pos, _ ->
-                siteLongPress(p, pos, v); true
+        // Recorremos cada categoría y la repartimos en sub-paneles de 12.
+        for (cat in 0 until SITES_CATEGORY_COUNT) {
+            val items = loadPanel(cat)
+            val pageCount = if (items.isEmpty()) 1
+                else (items.size + SITES_PER_PAGE - 1) / SITES_PER_PAGE
+            for (sub in 0 until pageCount) {
+                sitesPanelMap.add(intArrayOf(cat, sub))
+                val page = makeSitesPage(cat, sub, items, panelWidth)
+                sitesPages.addView(page)
             }
-            setupSiteDrag(gv, p)
         }
+        // Mantener la página activa dentro de rango y reposicionar.
+        sitesPage = sitesPage.coerceIn(0, (sitesPanelMap.size - 1).coerceAtLeast(0))
         renderSitesDots()
         updateSitesTitle()
         // Si el pager aún no tenía ancho cuando se construyeron los
         // paneles, repintamos una vez medido para fijar el ancho real.
         if (sitesPager.width == 0) {
             sitesPager.post { buildSitesPanels() }
+        } else {
+            sitesPager.post {
+                sitesPager.scrollTo(sitesPage * sitesPager.width, 0)
+            }
         }
     }
 
-    private fun sitesAdapter(panel: Int): BaseAdapter {
-        val items = loadPanel(panel)
-        return object : BaseAdapter() {
-            override fun getCount(): Int = items.size
-            override fun getItem(p: Int): String = items[p]
-            override fun getItemId(p: Int): Long = p.toLong()
-            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
-                val v = cv ?: layoutInflater.inflate(R.layout.item_site, parent, false)
-                val name = items[p].substringBefore('|')
-                val url = items[p].substringAfter('|')
-                val host = hostOf(url)
-                val icon = v.findViewById<ImageView>(R.id.siteIcon)
-                // monograma inmediato + favicon real (memoria/disco/red)
-                icon.setImageBitmap(Favicons.cached(this@BrowserActivity, host)
-                    ?: Favicons.monogram(host, dp(40)))
-                if (host.isNotEmpty()) {
-                    Favicons.fetchAsync(this@BrowserActivity, host) { b ->
-                        if (b != null) runOnUiThread {
-                            try { icon.setImageBitmap(b) } catch (e: Exception) { }
-                        }
-                    }
+    /**
+     * Crea un sub-panel (GridLayout 4×3) para la "ventana" `sub` de la
+     * categoría `cat`. Cada celda es un acceso; las vacías (cuando la
+     * categoría no llena los 12 huecos) quedan en blanco pero conservan
+     * su tamaño, así nunca hay scroll vertical ni desbordamiento.
+     */
+    private fun makeSitesPage(cat: Int, sub: Int, items: List<String>, panelWidth: Int): View {
+        val page = LinearLayout(this)
+        page.orientation = LinearLayout.VERTICAL
+        page.layoutParams = LinearLayout.LayoutParams(panelWidth, ViewGroup.LayoutParams.MATCH_PARENT)
+        val grid = android.widget.GridLayout(this)
+        grid.columnCount = SITES_COLUMNS
+        grid.rowCount = SITES_ROWS
+        grid.setPadding(dp(8), dp(4), dp(8), dp(8))
+        grid.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        val from = sub * SITES_PER_PAGE
+        val to = minOf(items.size, from + SITES_PER_PAGE)
+        for (slot in 0 until SITES_PER_PAGE) {
+            val idxInCat = from + slot
+            val col = slot % SITES_COLUMNS
+            val row = slot / SITES_COLUMNS
+            val cellView: View
+            if (idxInCat < to) {
+                cellView = makeSiteCell(cat, idxInCat, items)
+                cellView.setOnClickListener { openSite(cat, idxInCat) }
+                cellView.setOnLongClickListener { v ->
+                    siteLongPress(cat, idxInCat, v); true
                 }
-                v.findViewById<TextView>(R.id.siteName).text = name
-                // 4.0 U8: en modo edición cada celda muestra su ✕
-                v.findViewById<View>(R.id.siteDel).visibility =
-                    if (editSites) View.VISIBLE else View.GONE
-                v.findViewById<View>(R.id.siteDel).setOnClickListener {
-                    AlertDialog.Builder(this@BrowserActivity)
-                        .setTitle("Quitar «$name»")
-                        .setMessage(if (panel == 2) "¿Eliminar este acceso de «Mis sitios»?"
-                            else "¿Quitar «$name» del panel? Puedes recuperarlo con «Restaurar».")
-                        .setPositiveButton("Quitar") { _, _ -> removeSite(panel, p) }
-                        .setNegativeButton("Cancelar", null)
-                        .show()
+                // El drag se inicia desde la celda (startSiteDrag) pero el
+                // drop lo escucha el GridLayout entero del sub-panel, así
+                // podemos resolver el slot bajo el dedo aunque el drag
+                // crucé varias celdas. Se monta una sola vez por sub-panel.
+            } else {
+                // Hueco vacío: celda invisible que mantiene el grid simétrico.
+                cellView = android.view.View(this)
+            }
+            val lp = android.widget.GridLayout.LayoutParams()
+            lp.width = 0
+            lp.height = 0
+            lp.columnSpec = android.widget.GridLayout.spec(col, 1f)
+            lp.rowSpec = android.widget.GridLayout.spec(row, 1f)
+            cellView.layoutParams = lp
+            grid.addView(cellView)
+        }
+        // El listener de drag va en el GridLayout (recubre las 12 celdas);
+        // resuelve el slot destino por hit-test de globalVisibleRect.
+        setupSiteDrag(grid, cat, sub)
+        page.addView(grid)
+        return page
+    }
+
+    /** Construye una celda de acceso (icono + nombre + badge ✕ en edición). */
+    private fun makeSiteCell(cat: Int, idxInCat: Int, items: List<String>): View {
+        val v = layoutInflater.inflate(R.layout.item_site, sitesPages, false)
+        val entry = items[idxInCat]
+        val name = entry.substringBefore('|')
+        val url = entry.substringAfter('|')
+        val host = hostOf(url)
+        val icon = v.findViewById<ImageView>(R.id.siteIcon)
+        icon.setImageBitmap(Favicons.cached(this@BrowserActivity, host)
+            ?: Favicons.monogram(host, dp(40)))
+        if (host.isNotEmpty()) {
+            Favicons.fetchAsync(this@BrowserActivity, host) { b ->
+                if (b != null) runOnUiThread {
+                    try { icon.setImageBitmap(b) } catch (e: Exception) { }
                 }
-                return v
             }
         }
+        v.findViewById<TextView>(R.id.siteName).text = name
+        // 4.0 U8: en modo edición cada celda muestra su ✕
+        v.findViewById<View>(R.id.siteDel).visibility =
+            if (editSites) View.VISIBLE else View.GONE
+        v.findViewById<View>(R.id.siteDel).setOnClickListener {
+            AlertDialog.Builder(this@BrowserActivity)
+                .setTitle("Quitar «$name»")
+                .setMessage(if (cat == 2) "¿Eliminar este acceso de «Mis sitios»?"
+                    else "¿Quitar «$name» del panel? Puedes recuperarlo con «Restaurar».")
+                .setPositiveButton("Quitar") { _, _ -> removeSite(cat, idxInCat) }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+        return v
     }
 
     private fun openSite(panel: Int, pos: Int) {
@@ -2120,55 +2258,60 @@ class BrowserActivity : Activity() {
     }
 
     /** Menú contextual de pulsación larga (4.0 U8): en lectura ofrece
-     *  abrir/renombrar/reordenar/eliminar; en edición inicia el arrastre. */
-    private fun siteLongPress(panel: Int, pos: Int, view: View) {
-        val items = loadPanel(panel)
-        if (pos >= items.size) return
+     *  abrir/renombrar/reordenar/eliminar; en edición inicia el arrastre.
+     *  `idxInCat` es la posición absoluta dentro de la categoría (no del
+     *  sub-panel), porque el GridLayout del sub-panel ya no expone un
+     *  `pointToPosition` fiable: cada celda sabe su índice y lo pasa aquí. */
+    private fun siteLongPress(cat: Int, idxInCat: Int, view: View) {
+        val items = loadPanel(cat)
+        if (idxInCat >= items.size) return
         if (editSites) {
-            startSiteDrag(pos, view)
+            startSiteDrag(idxInCat, view)
             return
         }
-        val entry = items[pos]
+        val entry = items[idxInCat]
         val name = entry.substringBefore('|')
         val url = entry.substringAfter('|')
         val opts = arrayOf(
             "🗂 Abrir en pestaña nueva",
             "✏ Renombrar",
             "⬆ Mover al inicio",
-            "🗑 Eliminar este acceso")
+            "🗑 Eliminar este acceso",
+            "📝 Renombrar este panel")
         AlertDialog.Builder(this)
             .setTitle(name)
             .setItems(opts) { _, w ->
                 when (w) {
                     0 -> newTab(url, true)
-                    1 -> renameSite(panel, pos)
+                    1 -> renameSite(cat, idxInCat)
                     2 -> {
-                        items.removeAt(pos); items.add(0, entry)
-                        savePanel(panel, items); buildSitesPanels()
+                        items.removeAt(idxInCat); items.add(0, entry)
+                        savePanel(cat, items); buildSitesPanels()
                     }
                     3 -> AlertDialog.Builder(this)
                         .setTitle("Eliminar «$name»")
-                        .setPositiveButton("Eliminar") { _, _ -> removeSite(panel, pos) }
+                        .setPositiveButton("Eliminar") { _, _ -> removeSite(cat, idxInCat) }
                         .setNegativeButton("Cancelar", null).show()
+                    4 -> renamePanelTitle(cat)
                 }
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    private fun renameSite(panel: Int, pos: Int) {
-        val items = loadPanel(panel)
-        if (pos >= items.size) return
+    private fun renameSite(cat: Int, idxInCat: Int) {
+        val items = loadPanel(cat)
+        if (idxInCat >= items.size) return
         val e = android.widget.EditText(this)
-        e.setText(items[pos].substringBefore('|'))
+        e.setText(items[idxInCat].substringBefore('|'))
         AlertDialog.Builder(this)
             .setTitle("Renombrar acceso")
             .setView(e)
             .setPositiveButton("Guardar") { _, _ ->
                 val n = e.text.toString().trim()
                 if (n.isNotEmpty()) {
-                    items[pos] = n + "|" + items[pos].substringAfter('|')
-                    savePanel(panel, items)
+                    items[idxInCat] = n + "|" + items[idxInCat].substringAfter('|')
+                    savePanel(cat, items)
                     buildSitesPanels()
                 }
             }
@@ -2176,40 +2319,61 @@ class BrowserActivity : Activity() {
             .show()
     }
 
-    private fun removeSite(panel: Int, pos: Int) {
-        val items = loadPanel(panel).toMutableList()
-        if (pos < items.size) {
-            items.removeAt(pos)
-            savePanel(panel, items)
+    private fun removeSite(cat: Int, idxInCat: Int) {
+        val items = loadPanel(cat).toMutableList()
+        if (idxInCat < items.size) {
+            items.removeAt(idxInCat)
+            savePanel(cat, items)
             buildSitesPanels()
             toast("Acceso eliminado")
         }
     }
 
-    /** Arrastre para reordenar (4.0 U8): suelta sobre otra celda y queda ahí. */
-    private fun startSiteDrag(pos: Int, view: View) {
+    /** Arrastre para reordenar (4.0 U8): suelta sobre otra celda y queda ahí.
+     *  4.2.1: el drag se monta sobre la celda concreta (no sobre el GridView,
+     *  que ya no existe); el drop se resuelve calculando qué celda del sub-panel
+     *  está bajo el dedo con hit-test del GridLayout. */
+    private fun startSiteDrag(idxInCat: Int, view: View) {
         try {
-            val data = android.content.ClipData.newPlainText("pos", pos.toString())
+            val data = android.content.ClipData.newPlainText("idx", idxInCat.toString())
             view.startDragAndDrop(data, View.DragShadowBuilder(view), null, 0)
             view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         } catch (e: Exception) { }
     }
 
-    private fun setupSiteDrag(gv: GridView, panel: Int) {
-        gv.setOnDragListener { _, ev ->
+    /**
+     * Drag listener del GridLayout de un sub-panel (4.2.1). Resuelve el
+     * slot destino por hit-test (globalVisibleRect de cada celda), porque
+     * el GridLayout no expone `pointToPosition`. El índice destino en la
+     * categoría = offset de la ventana (sub * SITES_PER_PAGE) + slot.
+     */
+    private fun setupSiteDrag(grid: android.widget.GridLayout, cat: Int, sub: Int) {
+        grid.setOnDragListener { _, ev ->
             when (ev.action) {
                 android.view.DragEvent.ACTION_DRAG_STARTED -> true
                 android.view.DragEvent.ACTION_DROP -> {
-                    val from = ev.clipData?.getItemAt(0)?.text?.toString()?.toIntOrNull() ?: -1
-                    val to = gv.pointToPosition(ev.x.toInt(), ev.y.toInt())
-                    if (from >= 0 && to != GridView.INVALID_POSITION && from != to) {
-                        val items = loadPanel(panel).toMutableList()
-                        if (from < items.size && to < items.size) {
-                            val moved = items.removeAt(from)
-                            items.add(to, moved)
-                            savePanel(panel, items)
-                            buildSitesPanels()
+                    val from = ev.clipData?.getItemAt(0)?.text?.toString()
+                        ?.toIntOrNull() ?: -1
+                    if (from < 0) return@setOnDragListener true
+                    var dropSlot = -1
+                    for (slot in 0 until grid.childCount) {
+                        val cell = grid.getChildAt(slot) ?: continue
+                        val r = android.graphics.Rect()
+                        cell.getGlobalVisibleRect(r)
+                        if (ev.x.toInt() in r.left..r.right &&
+                            ev.y.toInt() in r.top..r.bottom) {
+                            dropSlot = slot
+                            break
                         }
+                    }
+                    if (dropSlot < 0) return@setOnDragListener true
+                    val to = sub * SITES_PER_PAGE + dropSlot
+                    val items = loadPanel(cat).toMutableList()
+                    if (to != from && from < items.size && to < items.size) {
+                        val moved = items.removeAt(from)
+                        items.add(to, moved)
+                        savePanel(cat, items)
+                        buildSitesPanels()
                     }
                     true
                 }
@@ -2220,7 +2384,8 @@ class BrowserActivity : Activity() {
 
     private fun renderSitesDots() {
         sitesDots.removeAllViews()
-        for (i in 0 until SITES_PANEL_COUNT) {
+        // 4.2.1: el número de puntos es dinámico (un sub-panel por punto).
+        for (i in 0 until sitesPanelMap.size) {
             val dot = TextView(this)
             dot.text = "•"
             dot.textSize = 17f
@@ -2232,16 +2397,48 @@ class BrowserActivity : Activity() {
     }
 
     private fun jumpSitesPage(i: Int) {
-        sitesPage = i.coerceIn(0, SITES_PANEL_COUNT - 1)
+        sitesPage = i.coerceIn(0, (sitesPanelMap.size - 1).coerceAtLeast(0))
         val w = sitesPager.width.coerceAtLeast(1)
         sitesPager.smoothScrollTo(sitesPage * w, 0)
         renderSitesDots()
         updateSitesTitle()
     }
 
+    /**
+     * 4.2.1 (U9): snap a la página más cercana tras un swipe. Calcula la
+     * página destino a partir del scroll X actual (página = round(sx / w))
+     * y usa `smoothScrollTo` para animar el encaje. Se protege con
+     * `sitesSnapBusy` para no reentrar si el usuario vuelve a tocar antes
+     * de que termine la animación (la animación de snap dispara más
+     * eventos de scroll, que sin el guardameta re-snappearían).
+     */
+    private fun scheduleSitesSnap() {
+        if (sitesSnapBusy) return
+        val w = sitesPager.width.coerceAtLeast(1)
+        val target = Math.round(sitesPager.scrollX / w.toFloat())
+            .coerceIn(0, (sitesPanelMap.size - 1).coerceAtLeast(0))
+        if (target == sitesPage && Math.abs(sitesPager.scrollX - target * w) < 5) return
+        sitesSnapBusy = true
+        sitesPage = target
+        sitesPager.smoothScrollTo(target * w, 0)
+        renderSitesDots()
+        updateSitesTitle()
+        sitesPager.postDelayed({ sitesSnapBusy = false }, 350)
+    }
+
+    /** Título del sub-panel activo: nombre de la categoría + sufijo "· 2"
+     *  cuando hay más de un sub-panel de esa categoría. */
     private fun updateSitesTitle() {
-        txtSitesTitle.text = PANEL_TITLES[sitesPage.coerceIn(0, 2)] +
-            if (editSites) "  ·  modo edición" else ""
+        if (sitesPanelMap.isEmpty()) {
+            txtSitesTitle.text = ""
+            return
+        }
+        val (cat, sub) = sitesPanelMap[sitesPage.coerceIn(0, sitesPanelMap.size - 1)]
+        val base = panelTitle(cat)
+        // ¿Cuántos sub-paneles tiene esta categoría?
+        val nSubs = sitesPanelMap.count { it[0] == cat }
+        val label = if (nSubs > 1) "$base  ·  ${sub + 1}/$nSubs" else base
+        txtSitesTitle.text = label + if (editSites) "  ·  modo edición" else ""
     }
 
     private fun addSiteDialog() {
@@ -2864,7 +3061,16 @@ class BrowserActivity : Activity() {
         detected[url] = Detected(url, type)
         detected[url]?.tabUid = tabUid
         if (title.isNotBlank()) detected[url]?.pageTitle = title
-        updateDetectBtn()
+        // 4.2.1 (bug H8 del reporte): updateDetectBtn toca vistas (setText,
+        // setVisibility) y solo puede correr en el hilo UI. addDetected se
+        // invoca desde shouldInterceptRequest (hilo de red de Chromium); si
+        // llamamos directo a updateDetectBtn() el framework lanza
+        // CalledFromWrongThreadException y cierra la app (BLU C5L Max,
+        // 4.0.0/4.1.0, 4 ocurrencias en el reporte). Lo mismo con el
+        // postDelayed(uiH): uiH es un Handler de hilo UI y por tanto seguro,
+        // pero la actualización del contador va por runOnUiThread para
+        // garantizarlo desde cualquier hilo de llamada.
+        runOnUiThread { updateDetectBtn() }
         // sondeo automatico en background nada mas snifear: al abrir la
         // lista la duracion/tamano ya estan resueltos (o llegan en vivo)
         uiH.postDelayed({ kickProbes() }, 500)
@@ -2875,14 +3081,31 @@ class BrowserActivity : Activity() {
      * pestaña activa. Cada pestaña tiene su propia lista de capturas.
      */
     private fun updateDetectBtn() {
+        // 4.2.1 (H8): puede invocarse desde un hilo de red (vía addDetected
+        // desde shouldInterceptRequest) o desde el hilo UI. Si no estamos
+        // en el hilo UI, programamos la actualización y salimos: tocar
+        // vistas (setText, setVisibility) desde otro hilo lanza
+        // CalledFromWrongThreadException. (addDetected ya hace
+        // runOnUiThread, pero este guardameta cubre también las llamadas
+        // directas futuras.)
+        if (android.os.Looper.myLooper() !== android.os.Looper.getMainLooper()) {
+            runOnUiThread { updateDetectBtn() }
+            return
+        }
         val uid = currentTab()?.uid ?: -1
         val n = synchronized(detected) { detected.values.count { it.tabUid == uid } }
-        btnVideos.text = if (n > 0) "⬇ Detectados: $n" else "⬇ Detectados"
-        // FAB flotante: medios + descargas directas, en tiempo real
-        val total = n + downloadEvents.size
-        fab.text = "▶ $total"
-        fab.visibility =
-            if (total > 0 && !homeOverlay.isVisible()) View.VISIBLE else View.GONE
+        try {
+            btnVideos.text = if (n > 0) "⬇ Detectados: $n" else "⬇ Detectados"
+            // FAB flotante: medios + descargas directas, en tiempo real
+            val total = n + downloadEvents.size
+            fab.text = "▶ $total"
+            fab.visibility =
+                if (total > 0 && !homeOverlay.isVisible()) View.VISIBLE else View.GONE
+        } catch (e: Exception) {
+            // Si la actividad ya se está destruyendo (vistas nulas), no
+            // hay nada que actualizar; tragar la excepción evita un
+            // crash tardío.
+        }
     }
 
     /** El FAB abre un selector: medios de la página o descargas directas. */
@@ -3113,6 +3336,20 @@ class BrowserActivity : Activity() {
         // se quedaba en la página anterior hasta que el usuario soltaba el
         // gesto. Repintamos en cuanto cambia el estado.
         renderMenuDots()
+    }
+
+    /** 4.2.1 (U9): snap a la página de menú más cercana tras un swipe. */
+    private fun scheduleMenuSnap() {
+        if (menuSnapBusy) return
+        val w = menuPager.width.coerceAtLeast(1)
+        val target = Math.round(menuPager.scrollX / w.toFloat())
+            .coerceIn(0, MENU_PAGE_COUNT - 1)
+        if (target == menuPage && Math.abs(menuPager.scrollX - target * w) < 5) return
+        menuSnapBusy = true
+        menuPage = target
+        menuPager.smoothScrollTo(target * w, 0)
+        renderMenuDots()
+        menuPager.postDelayed({ menuSnapBusy = false }, 350)
     }
 
     /** Las tres páginas del menú: navegación, herramientas y privacidad.

@@ -1,3 +1,110 @@
+# TurboDL 4.2.1 — Notas de la versión
+
+Fecha: 2026-11-21
+
+Esta versión corrige el crash que reportaste en la 4.0.0/4.1.0 (el
+`CalledFromWrongThreadException` del logcat de la BLU C5L Max) y añade
+los cambios que pediste para la navegación de los paneles de accesos y
+del menú: swipe por página completa (no scroll fluido), sin
+desbordamiento, y nombre de panel editable.
+
+## 1. Crash al detectar medios (H8)
+
+- **Síntoma** (del `reporte.log` que subiste): al abrir una página con
+  medios, la app se cierra con `android.view.ViewRootImpl$CalledFromWrongThreadException:
+  Only the original thread that created a view hierarchy can touch its views.`
+  en `BrowserActivity.updateDetectBtn → TextView.setText`, llamada desde
+  `shouldInterceptRequest`. Aparece 4 veces en el reporte (2 en 4.0.0 y
+  2 en 4.1.0).
+- **Causa raíz** (`BrowserActivity.kt`):
+  `WebViewClient.shouldInterceptRequest` corre en un hilo de red de
+  Chromium. Cada petición matching `MEDIA_RE`/`DETECT_RE` llamaba a
+  `addDetected(...)`, que a su vez llamaba a `updateDetectBtn()`, que
+  toca vistas (`btnVideos.setText`, `fab.setText`, `fab.visibility`).
+  Android prohíbe tocar vistas desde un hilo que no sea el UI.
+- **Solución**: `addDetected` ahora envuelve `updateDetectBtn()` en
+  `runOnUiThread { ... }`; además `updateDetectBtn` tiene un guardameta
+  que, si se la invoca desde otro hilo en el futuro, reprograma en el hilo
+  UI. La persistencia de `detected` y el `postDelayed(uiH, ...)` ya eran
+  seguros (`uiH` es un handler del hilo UI). El contador del FAB y el
+  badge de "Detectados" siguen actualizándose en tiempo real.
+
+## 2. Swipe por página completa (no scroll fluido)
+
+Pediste: *"en la próxima versión para la navegación de los paneles de
+accesos directos y del menú no lo quiero como scroll fluido sino que con
+movimiento de swipe pase de pestañas completamente"*.
+
+- Implementado en **paneles de accesos** y en **menú** con un
+  `OnTouchListener` que, al soltar el dedo (`ACTION_UP`/`ACTION_CANCEL`),
+  dispara `scheduleSitesSnap()` / `scheduleMenuSnap()`. Estas funciones
+  calculan la página más cercana como `round(scrollX / pageWidth)` y la
+  animan con `smoothScrollTo`, encajando la página entera (igual que un
+  ViewPager, pero sin añadir ninguna dependencia externa — importante,
+  porque el build es offline y la integración de libs externas ha sido
+  problemática).
+- Un flag `sitesSnapBusy`/`menuSnapBusy` evita la reentrancia durante la
+  animación de snap (que dispara más eventos de scroll).
+- El indicador de puntos y el título del panel se actualizan en tiempo
+  real mientras deslizas, y se afianzan al soltar.
+
+## 3. Sin desbordamiento — todo cabe en pantalla
+
+Pediste: *"que no haya desbordamiento y que todo aparezca en pantalla; no
+medios iconos, sino cabe añadir a otra pestaña/panel"*.
+
+- Cada sub-panel de accesos es ahora un `GridLayout` de 4 columnas × 3
+  filas = 12 huecos, con peso `1f` por celda — ocupan exactamente el
+  área visible, sin scroll vertical interno.
+- Si una categoría tiene **más de 12 accesos**, se reparte
+  automáticamente en 2 o más sub-paneles paginados (no aparece scroll
+  vertical; se añade otro panel). Por ejemplo, 13 accesos = 2
+  sub-paneles, 25 accesos = 3 sub-paneles.
+- Las celdas vacías (cuando una categoría no llena los 12 huecos) se
+  mantienen invisibles pero conservan su tamaño, así la rejilla nunca se
+  deforma ni desborda.
+- El menú inferior ya cabía (10 celdas por página, 3 páginas); solo se le
+  añadió el snap por página completa.
+
+## 4. Renombrar paneles de accesos
+
+Pediste: *"además quiero poder editar el nombre de los paneles de acceso
+directo que ahora no puedo"*.
+
+- Pulsación larga sobre el **título del panel** (`txtSitesTitle`) abre el
+  diálogo "Renombrar panel", con el nombre actual precargado. Aceptar lo
+  guarda; "Restaurar" lo devuelve al nombre por defecto.
+- También accesible desde el menú contextual de cada celda (pulsación
+  larga sobre un acceso → "📝 Renombrar este panel").
+- Los títulos se persisten por usuario activo
+  (`siteTitleN_<user>` en SharedPreferences). El botón "Restaurar
+  accesos" también limpia los títulos renombrados.
+- El título del sub-panel muestra el nombre de la categoría + sufijo
+  "· 2/3" cuando una categoría ocupa varios sub-paneles.
+
+## 5. Internas
+
+- `versionCode` 17, `versionName` 4.2.1.
+- Constantes reorganizadas: `SITES_CATEGORY_COUNT=3`, `SITES_PER_PAGE=12`
+  (antes `SITES_PANEL_COUNT=3`, `SITES_ROWS_VISIBLE=3`).
+- `sitesAdapter` (GridView) reemplazado por `makeSitesPage` (GridLayout
+  por sub-panel) y `makeSiteCell` (celda individual). El drag para
+  reordenar se resuelve por hit-test del GridLayout.
+- Tests: `SitesPanelsTest` reescrito (15 casos) blindando las nuevas
+  constantes, el reparto automático en sub-paneles y la fórmula de
+  snap. Los 119 tests JVM siguen pasando.
+
+## 6. Instalación
+
+APK de debug firmado con la clave de depuración. Permite instalación en
+Android 8.0+ (API 26).
+
+```
+adb install TurboDL-4.2.1.apk
+```
+
+---
+
 # TurboDL 4.2.0 — Notas de la versión
 
 Fecha: 2026-11-20

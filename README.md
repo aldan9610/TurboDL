@@ -1,10 +1,49 @@
-# TurboDL 4.2.0
+# TurboDL 4.2.1
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.1 — crash del detector arreglado, swipe por página completa, paneles sin desbordamiento y renombrables
+
+La 4.2.1 corrige el `CalledFromWrongThreadException` que cerraba la app al
+detectar medios en una página (presente desde la 4.0.0) y trae los cambios
+que pidió el usuario en la navegación de los paneles de accesos y del menú.
+
+### 🐛 Crash al detectar medios (H8, arreglado)
+`shouldInterceptRequest` corre en un hilo de red de Chromium y llamaba a
+`updateDetectBtn()`, que toca vistas (`setText`, `setVisibility`). Android
+lo prohíbe y lanza `CalledFromWrongThreadException`, cerrando la app.
+Ahora `addDetected` envuelve la actualización del contador en
+`runOnUiThread`, y `updateDetectBtn` tiene un guardameta para llamadas
+desde hilos de red.
+
+### 📱 Swipe por página completa (no scroll fluido)
+- Paneles de accesos y menú: al soltar el dedo, la página "encaja" en la
+  más cercana (snap), como un libro de páginas enteras.
+- Implementado con `OnTouchListener` + `smoothScrollTo`, **sin añadir
+  ninguna dependencia externa** (el build sigue siendo offline).
+
+### 🗂 Paneles de accesos sin desbordamiento
+- Cada sub-panel es un `GridLayout` de 4×3 = 12 huecos con peso 1f por
+  celda: ocupan exactamente el área visible, sin scroll vertical interno.
+- Si una categoría tiene más de 12 accesos, se reparte en sub-paneles
+  paginados adicionales (13 → 2 paneles, 25 → 3 paneles).
+- Las celdas vacías mantienen su tamaño para que la rejilla no se deforme.
+
+### ✏ Renombrar paneles de accesos
+- Pulsación larga sobre el título del panel abre el diálogo de renombrar.
+- También accesible desde el menú contextual de cada acceso.
+- Los títulos se persisten por usuario activo; "Restaurar accesos"
+  también los limpia.
+
+### 📦 Internas
+- versionCode 17, versionName 4.2.1.
+- `SitesPanelsTest` reescrito (15 casos). Los 119 tests JVM siguen pasando.
+
+---
 
 ## Novedades de la 4.2.0 — crash al navegar arreglado, selector de bloqueadores, CRUD de notas y usuarios, visor de sandbox
 
@@ -102,7 +141,7 @@ Todo es de solo lectura: para borrar hay que usar "Limpiar datos" o
 eliminar al usuario.
 
 ### 📦 Internas
-- versionCode 16, versionName 4.2.0.
+- versionCode 17, versionName 4.2.1.
 - `AdblockCatalog.kt` (nuevo): catálogo de listas, persistencia de la
   selección, validación de ids y URLs.
 - `HostsAdapter.kt` (nuevo): convierte listas tipo `0.0.0.0 host` a
