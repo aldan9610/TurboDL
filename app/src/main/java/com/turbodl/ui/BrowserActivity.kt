@@ -91,6 +91,12 @@ class BrowserActivity : Activity() {
         var redirects: Int = 0     // redirecciones de anuncio bloqueadas
         var lastUse: Long = 0      // última vez que se adjuntó (para recortar memoria)
         val blockedItems = ArrayList<String>() // detalles del escudo (cap 120)
+        /** 4.2.5: el usuario pulsó btnHome y limpió la pestaña. Mientras
+         *  esté a true, onPageStarted/onPageFinished NO reescriben t.url
+         *  (para que la URL limpiada no "reviva") y ensureWv NO recarga
+         *  la URL vieja al reconstruir el WebView. Se resetea a false
+         *  cuando el usuario carga una nueva URL explícitamente (load()). */
+        var cleared: Boolean = false
     }
     private val tabs = ArrayList<Tab>()
     private var cur = 0
@@ -672,15 +678,20 @@ class BrowserActivity : Activity() {
         //   2º toque (cuando la vista principal ya está visible): la
         //   oculta y deja el campo listo para escribir una nueva búsqueda.
         findViewById<Button>(R.id.btnHome).setOnClickListener { onHomePressed() }
-        // 4.2.3: botón explícito "volver a la vista principal". A
-        // diferencia de btnHome (dos toques: 1º reinicia la búsqueda,
-        // 2º va a la vista principal), este botón va DIRECTO e
-        // inmediato a la vista principal en un solo toque. No toca la
-        // pestaña actual: solo muestra el homeOverlay con los paneles
-        // de accesos. Si ya está visible, lo oculta.
+        // 4.2.5: botón explícito "volver a la vista principal". A
+        // diferencia de btnHome (1er toque limpia la pestaña, 2º va a la
+        // vista principal), este botón va SIEMPRE DIRECTO a la vista
+        // principal en un solo toque, sin tocar la pestaña actual (la URL
+        // cargada se conserva tal cual). Es el atajo para volver al menú
+        // principal de la aplicación. Ya no es un toggle: siempre muestra
+        // la vista principal (lo que pediste).
         findViewById<Button>(R.id.btnMainHome).setOnClickListener {
-            if (homeOverlay.isVisible()) showHome(false)
-            else showHome(true)
+            showHome(true)
+            editUrl.setText("")
+            editUrl.hint = "Página de inicio"
+            findViewById<Button>(R.id.btnClear).visibility = View.GONE
+            editUrl.requestFocus()
+            showKb()
         }
         btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
@@ -1271,6 +1282,7 @@ class BrowserActivity : Activity() {
             editUrl.clearFocus()
             val t = tabs[if (cur in tabs.indices) cur else 0]
             t.url = url
+            t.cleared = false   // 4.2.5: carga explícita → ya no está "limpia"
             t.showHome = false
             val w = ensureWv(t)
             if (w.parent == null) attach(t)
@@ -1319,55 +1331,58 @@ class BrowserActivity : Activity() {
     }
 
     /**
-     * 4.2.2 (U10): comportamiento de dos toques del botón Home.
+     * 4.2.5 (redefinido): flujo del botón Home del navegador.
      *
-     * Lo que pediste: "al tocar una vez el Home se reinicie toda la
-     * búsqueda y todo quede limpio, y cuando le dé otra vez al home vaya
-     * a la vista principal de la aplicación (ahora me quedo atascado
-     * dentro del navegador integrado)".
+     * Lo que pediste: "el botón de Home debería limpiar toda la búsqueda
+     * de la pestaña donde esté navegando, y cuando le dé de nuevo y no
+     * haya nada en la búsqueda, debería ir a la vista principal de la
+     * aplicación".
      *
-     *   · Si la vista principal (homeOverlay) NO está visible:
-     *     - Si hay una URL/página cargada: la descarta (about:blank),
-     *       limpia la barra de dirección y muestra la vista principal
-     *       con los paneles de accesos. "Todo queda limpio".
-     *     - Si la pestaña ya está en blanco: muestra directamente la
-     *       vista principal.
-     *   · Si la vista principal YA está visible: la oculta y deja el
-     *     campo URL vacío y enfocado para una nueva búsqueda.
+     *   · 1er toque: si la pestaña actual tiene una página/URL cargada,
+     *     la LIMPIA por completo: descarga about:blank, vacía t.url,
+     *     vacía la barra de dirección y marca t.cleared=true (para que
+     *     onPageStarted/onPageFinished/ensureWv no resuciten la URL vieja).
+     *     NO muestra la vista principal — el usuario sigue en el navegador
+     *     con todo limpio, listo para una nueva búsqueda.
+     *   · 2º toque (cuando ya no hay nada que limpiar): va a la vista
+     *     principal de la aplicación (homeOverlay con los paneles de
+     *     accesos directos).
      */
     private fun onHomePressed() {
-        if (!homeOverlay.isVisible()) {
-            // 1er toque: volver a la vista principal, limpiando la página.
-            val t = tabs.getOrNull(cur)
-            val hasPage = t != null && t.url.isNotEmpty() && t.url != "about:blank"
-            if (hasPage) {
-                // "Reiniciar la búsqueda": descarga la página actual.
-                try { t?.wv?.loadUrl("about:blank") } catch (e: Exception) { }
-                t?.url = ""
-                t?.title = ""
-                t?.wv?.tag = null
-                // Limpia la lista de medios detectados de esta pestaña.
-                synchronized(detected) {
-                    val uid = t?.uid ?: -1
-                    detected.values.removeAll { it.tabUid == uid }
-                }
+        val t = tabs.getOrNull(cur)
+        val hasContent = t != null &&
+            (t.url.isNotEmpty() && t.url != "about:blank") &&
+            !t.cleared
+        if (hasContent) {
+            // 1er toque: limpiar la búsqueda de esta pestaña.
+            try { t?.wv?.loadUrl("about:blank") } catch (e: Exception) { }
+            t?.url = ""
+            t?.title = ""
+            t?.cleared = true   //Bloquear que la URL reviva
+            t?.showHome = false
+            // Limpia los medios detectados de esta pestaña.
+            synchronized(detected) {
+                val uid = t?.uid ?: -1
+                detected.values.removeAll { it.tabUid == uid }
             }
-            // Limpia la barra de dirección y muestra la vista principal.
+            // Limpia la barra de dirección y el botón X.
             suppressSuggest = true
             editUrl.setText("")
             editUrl.hint = "Página de inicio"
             suppressSuggest = false
             findViewById<Button>(R.id.btnClear).visibility = View.GONE
-            showHome(true)
-            editUrl.requestFocus()
-            showKb()
-        } else {
-            // 2º toque: ocultar la vista principal y dejar el campo listo
-            // para escribir una nueva URL/búsqueda.
+            // Oculta la vista principal si estuviera visible: el 1er toque
+            // NO va a la vista principal, solo limpia la pestaña.
             showHome(false)
-            suppressSuggest = true
+            hideKb()
+            renderStrip()
+            persistTabs()
+            toast("Pestaña limpiada. Toca Home de nuevo para ir a la vista principal")
+        } else {
+            // 2º toque: no hay nada que limpiar → ir a la vista principal.
+            showHome(true)
             editUrl.setText("")
-            suppressSuggest = false
+            editUrl.hint = "Página de inicio"
             findViewById<Button>(R.id.btnClear).visibility = View.GONE
             editUrl.requestFocus()
             showKb()
@@ -1475,7 +1490,7 @@ class BrowserActivity : Activity() {
                 true
             } else false
         }
-        if (t.url.isNotEmpty()) w.loadUrl(t.url)
+        if (t.url.isNotEmpty() && !t.cleared) w.loadUrl(t.url)
         t.wv = w
         return w
     }
@@ -1537,8 +1552,16 @@ class BrowserActivity : Activity() {
     private fun syncActive() {
         if (cur !in tabs.indices) return
         val t = tabs[cur]
-        t.url = t.wv?.url ?: t.url
-        t.title = t.wv?.title ?: t.title
+        // 4.2.5: si la pestaña fue limpiada por btnHome, NO rescribir t.url
+        // con lo que diga el WebView (que puede seguir siendo la URL
+        // vieja o about:blank). Respetamos el estado "limpia".
+        if (!t.cleared) {
+            val wvUrl = t.wv?.url
+            // about:blank no cuenta como URL real (lo deja el loadUrl de
+            // la limpieza); si el WebView dice eso, conservamos "".
+            if (wvUrl != null && wvUrl != "about:blank") t.url = wvUrl
+            t.title = t.wv?.title ?: t.title
+        }
         t.showHome = homeOverlay.isVisible()
     }
 
@@ -2687,7 +2710,7 @@ class BrowserActivity : Activity() {
             adFuseReq = 0
             adFuseBlk = 0
             offlineTold = false
-            if (url != null && url != "about:blank") {
+            if (url != null && url != "about:blank" && !t.cleared) {
                 t.url = url
                 if (isActive) {
                     prog.visibility = View.VISIBLE
@@ -2773,7 +2796,7 @@ class BrowserActivity : Activity() {
                     }
                 }.apply { isDaemon = true; name = "adblock-css" }.start()
             }
-            if (url != null && url.startsWith("http")) {
+            if (url != null && url.startsWith("http") && !t.cleared) {
                 t.url = url
                 t.title = view?.title ?: t.title
                 t.showHome = false

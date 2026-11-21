@@ -1,3 +1,78 @@
+# TurboDL 4.2.5 — Notas de la versión
+
+Fecha: 2026-11-21
+
+## Mejora del flujo de navegación: btnHome y btnMainHome
+
+Reportaste: *"el botón de Home del navegador debería limpiar toda la búsqueda
+de la pestaña donde esté navegando y cuando le dé de nuevo y no haya nada
+en búsqueda debería ir a la vista principal de la aplicación. El otro botón
+del menú debería ir directamente a la vista principal. Ninguna de las 2
+cosas está pasando; además cuando le doy a alguno de esos dos botones luego,
+estando todo limpio, me vuelve a abrir una URL que ya había limpiado. El
+comportamiento de todo esto es extraño, mejora el flujo de navegación"*.
+
+### 1. btnHome — dos toques, como pediste
+
+- **1er toque**: si la pestaña actual tiene una página/URL cargada, la
+  **limpia por completo**: carga `about:blank`, vacía `t.url`, vacía la
+  barra de dirección y quita el botón X. El usuario sigue en el navegador
+  con todo limpio, listo para una nueva búsqueda. NO muestra la vista
+  principal. Un toast avisa: *"Pestaña limpiada. Toca Home de nuevo para
+  ir a la vista principal"*.
+- **2º toque** (cuando ya no hay nada que limpiar): va a la **vista
+  principal** de la aplicación (homeOverlay con los paneles de accesos).
+
+Antes el 1er toque limpiaba Y mostraba la vista principal en el mismo
+toque, lo que no era lo que querías.
+
+### 2. btnMainHome — siempre directo a la vista principal
+
+- Ahora **siempre** va a la vista principal en un solo toque, sin
+  importar el estado. Ya no es un toggle (mostrar/ocultar). No toca la
+  pestaña actual: la URL cargada se conserva tal cual y al volver de la
+  vista principal la sigues viendo.
+
+### 3. La URL limpiada ya no "revive"
+
+Este era el bug más raro: tras limpiar con Home, la URL que acababas de
+descartar volvía a cargarse sola. La causa eran varios puntos del ciclo
+de vida del WebView/pestaña que reescribían `t.url` con la URL vieja o la
+recargaban:
+
+1. **`onPageStarted`** volvía a poner `t.url = url` cuando el WebView
+   disparaba cualquier carga (redirección, refresh interno, recarga
+   tras recortar memoria).
+2. **`onPageFinished`** hacía lo mismo al terminar.
+3. **`ensureWv`** (al reconstruir un WebView recortado por memoria) lo
+   recargaba desde `t.url`.
+4. **`syncActive`** (al pausar/cambiar de pestaña) copiaba `t.wv?.url`
+   (que podía seguir siendo la URL vieja o `about:blank`).
+
+**Solución**: nuevo flag `Tab.cleared`. Cuando btnHome limpia la
+pestaña, marca `cleared = true`. Ese flag se respeta en `onPageStarted`,
+`onPageFinished`, `ensureWv` y `syncActive` (no reescriben/recargan
+mientras esté activo), y se resetea en `load()` cuando el usuario carga
+una URL nueva explícitamente. Así la URL eliminada no vuelve a aparecer
+hasta que el usuario cargue algo a propósito.
+
+### Internas
+
+- `versionCode` 21, `versionName` 4.2.5.
+- Nuevo campo `Tab.cleared: Boolean`.
+- `onHomePressed` reescrito (flujo de dos toques: limpiar → vista
+  principal). `btnMainHome` ya no es toggle.
+- 122 tests JVM pasan (0 fallos).
+
+### Instalación
+
+```
+adb install -r TurboDL-4.2.5.apk
+```
+Misma firma que 4.2.4 → se actualiza sin desinstalar. Android 8.0+.
+
+---
+
 # TurboDL 4.2.4 — Notas de la versión
 
 Fecha: 2026-11-21

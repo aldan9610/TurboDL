@@ -1,10 +1,37 @@
-# TurboDL 4.2.4
+# TurboDL 4.2.5
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.5 — flujo de navegación corregido (btnHome y btnMainHome)
+
+Reescribe el comportamiento de los dos botones de la barra inferior del navegador
+y arregla el bug de que la URL limpiada "revivía" sola.
+
+### 🏠 btnHome — dos toques, como debe ser
+- **1er toque**: limpia la pestaña actual (about:blank + vacía URL y barra). Te
+  quedas en el navegador con todo limpio. No va a la vista principal.
+- **2º toque** (sin nada que limpiar): va a la **vista principal** de la app.
+
+### ⬛ btnMainHome — siempre directo a la vista principal
+- Ya no es un toggle (mostrar/ocultar). **Siempre** va a la vista principal en
+  un solo toque, sin tocar la pestaña actual (la URL cargada se conserva).
+
+### 🔒 La URL limpiada ya no "revive"
+Antes, tras limpiar con Home, la URL descartada volvía a cargarse sola por culpa
+de `onPageStarted`/`onPageFinished`/`ensureWv`/`syncActive`, que reescribían
+`t.url` con la URL vieja. Nuevo flag `Tab.cleared`: cuando btnHome limpia, se
+marca `true` y esos cuatro puntos dejan de tocar `t.url`. Se resetea en `load()`
+cuando el usuario carga una URL nueva a propósito.
+
+### 📦 Internas
+- versionCode 21, versionName 4.2.5. Misma firma que 4.2.4 (actualización sin
+  desinstalar). 122 tests JVM pasan (0 fallos).
+
+---
 
 ## Novedades de la 4.2.4 — firma estable para el APK de debug (actualizaciones sin desinstalar)
 
