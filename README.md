@@ -1,10 +1,33 @@
-# TurboDL 4.2.3
+# TurboDL 4.2.4
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.4 — firma estable para el APK de debug (actualizaciones sin desinstalar)
+
+Corrige el error que te obligaba a desinstalar la versión antigua antes de
+instalar la nueva (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`).
+
+### 🔑 Causa y solución
+El APK de debug se firmaba con la `debug.keystore` por defecto de Android, que
+se **regenera** cuando el sandbox de compilación se recicla; dos APKs sucesivos
+tenían firmas distintas y Android los rechazaba como actualización. A partir
+de la 4.2.4, el buildType **debug** también se firma con `turbo.keystore`
+(la misma keystore del release, estable y en el repo). Verificado con
+`apksigner`: todos los APKs comparten la huella SHA-256
+`10bb4b2b…d1631238b`.
+
+### 📲 Qué cambia para ti
+- A partir de la 4.2.4, podrás actualizar la app directamente instalando el APK
+  nuevo sobre el anterior, conservando accesos, pestañas y ajustes.
+- **Una sola excepción**: si tienes una versión anterior a la 4.2.4, tendrás
+  que desinstalarla **una última vez** para pasar a la 4.2.4. A partir de ahí,
+  todas las futuras se actualizarán sin desinstalar.
+
+---
 
 ## Novedades de la 4.2.3 — página de inicio sin logo, swipe inmediato, botón de vista principal
 

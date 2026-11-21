@@ -1,3 +1,69 @@
+# TurboDL 4.2.4 — Notas de la versión
+
+Fecha: 2026-11-21
+
+## Corrección: las actualizaciones fallaban con INSTALL_FAILED_UPDATE_INCOMPATIBLE
+
+Reportaste: *"algo está pasando, antes podía actualizar la aplicación
+directamente pero ahora me da error y tengo que desinstalar la antigua
+para instalar esta"*.
+
+### Causa raíz
+
+Android no permite instalar un APK firmado con una clave distinta sobre
+uno ya instalado (por seguridad: evita que alguien reemplace la app con
+una versión falsificada). El error que se ve en el instalador es
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE`.
+
+Hasta la 4.2.3, el APK de **debug** se firmaba con la `debug.keystore` por
+defecto de Android (`~/.android/debug.keystore`). Esa keystore se
+**regenera** cada vez que el sandbox de compilación se recicla (o en cada
+máquina distinta), con lo que dos APKs de debug sucesivos podían tener
+firmas distintas y Android los rechazaba como actualización. El APK de
+**release** sí usaba la keystore estable del repositorio (`turbo.keystore`),
+pero el que se publicaba era el de debug.
+
+### Solución
+
+A partir de la 4.2.4, el buildType **debug** también se firma con
+`turbo.keystore` (la misma keystore del release, que está en el repo y
+es estable). Así **todos** los APKs —debug o release— comparten la misma
+firma y se instalan uno sobre otro sin desinstalar la versión anterior.
+
+Verificado con `apksigner`:
+```
+Signer #1 certificate DN: CN=TurboDL, OU=Dev, O=TurboDL, C=ES
+Signer #1 certificate SHA-256 digest:
+  10bb4b2b6fead0edbb7368905e0986c46ff3d1a728b0f082f901607d1631238b
+```
+Coincide con la huella de `turbo.keystore`.
+
+### Qué significa para ti
+
+- **A partir de la 4.2.4** podrás actualizar la app directamente (instalar
+  el APK nuevo sobre el anterior) sin desinstalar nada. Conservarás los
+  accesos directos, pestañas guardadas, ajustes y demás datos.
+- **Una única excepción**: si tienes instalada una versión anterior a la
+  4.2.4 (firmada con la debug.keystore antigua), esa última sí tendrás que
+  **desinstalarla una sola vez** para pasar a la 4.2.4. A partir de ahí,
+  todas las futuras se actualizarán sin desinstalar.
+
+### Internas
+
+- `versionCode` 20, `versionName` 4.2.4.
+- `build.gradle`: `buildTypes.debug` ahora lleva
+  `signingConfig signingConfigs.release`.
+- 122 tests JVM pasan (0 fallos).
+
+### Instalación
+
+```
+adb install -r TurboDL-4.2.4.apk
+```
+(`-r` = reemplazar manteniendo los datos). Android 8.0+ (API 26).
+
+---
+
 # TurboDL 4.2.3 — Notas de la versión
 
 Fecha: 2026-11-21

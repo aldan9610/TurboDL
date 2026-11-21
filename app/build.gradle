@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 19
-        versionName "4.2.3"
+        versionCode 20
+        versionName "4.2.4"
     }
 
     signingConfigs {
@@ -43,6 +43,18 @@ android {
         }
         debug {
             minifyEnabled false
+            // 4.2.4: firmar el debug con la MISMA keystore del release
+            // (turbo.keystore). Sin esto, el debug se firmaba con la
+            // debug.keystore por defecto de Android (~/.android/), que
+            // se regenera cuando el sandbox de build se recicla (o entre
+            // máquinas), con lo que dos APKs de debug sucesivos podían
+            // tener firmas distintas y Android los rechazaba como
+            // actualización (INSTALL_FAILED_UPDATE_INCOMPATIBLE), lo
+            // que obligaba a desinstalar la versión antigua antes de
+            // instalar la nueva. Usando turbo.keystore (estable, en
+            // el repo) TODOS los APKs —debug o release— comparten
+            // firma y se instalan uno sobre otro sin desinstalar.
+            signingConfig signingConfigs.release
         }
     }
 
