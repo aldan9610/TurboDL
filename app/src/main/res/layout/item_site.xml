@@ -1,47 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- baldosa de acceso directo (4.0): icono real + nombre + badge X
-     para el modo edición (borrar/eliminar en modo explícito) -->
+<!-- baldosa de acceso directo (4.0; compactado 4.2.2).
+     4.2.2: en la BLU C5L Max (pantalla ~480×854, 3.5") los iconos se
+     recortaban. Se reduce padding (10→4dp), icono (40→32dp) y texto
+     (12→11sp), y se fuerza scaleType=centerInside + adjustViewBounds
+     para que el favicon siempre quepa sin recortarse. La celda mide
+     lo que le dé el GridLayout (peso 1f); su contenido ya no desborda. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
+    android:layout_height="match_parent"
     android:background="?android:attr/selectableItemBackground">
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="match_parent"
         android:gravity="center"
         android:orientation="vertical"
-        android:padding="10dp">
+        android:padding="4dp">
 
         <ImageView
             android:id="@+id/siteIcon"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:adjustViewBounds="true"
             android:contentDescription="sitio"
+            android:scaleType="centerInside"
             android:src="@mipmap/ic_launcher" />
 
         <TextView
             android:id="@+id/siteName"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
+            android:layout_marginTop="3dp"
             android:ellipsize="end"
             android:gravity="center"
-            android:singleLine="true"
+            android:maxLines="1"
             android:text="Sitio"
-            android:textSize="12sp" />
+            android:textColor="#212121"
+            android:textSize="11sp" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/siteDel"
-        android:layout_width="22dp"
-        android:layout_height="22dp"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
         android:layout_gravity="top|end"
         android:layout_margin="2dp"
         android:background="@drawable/fab_bg"
         android:gravity="center"
         android:text="✕"
         android:textColor="#FFFFFF"
-        android:textSize="11sp"
+        android:textSize="10sp"
         android:visibility="gone" />
 </FrameLayout>

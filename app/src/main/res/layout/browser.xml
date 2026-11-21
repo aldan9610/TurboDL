@@ -168,9 +168,28 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
                     android:text="Sitios comunes"
-                    android:textColor="#8A8A8A"
-                    android:textSize="12sp" />
+                    android:textColor="#5A5A5A"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <!-- 4.2.2: botón explícito para renombrar el panel (el
+                     long-press sobre el título también funciona, pero no
+                     era descubrible; este botón lo hace obvio). -->
+                <Button
+                    android:id="@+id/btnRenamePanel"
+                    style="?android:attr/borderlessButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:contentDescription="Renombrar este panel"
+                    android:minWidth="0dp"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="4dp"
+                    android:text="✏"
+                    android:textColor="#5A5A5A"
+                    android:textSize="14sp" />
 
                 <Button
                     android:id="@+id/btnEditSites"

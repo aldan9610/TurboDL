@@ -1,3 +1,133 @@
+# TurboDL 4.2.2 — Notas de la versión
+
+Fecha: 2026-11-21
+
+Esta versión corrige el crash que reportaste al abrir el menú en la 4.2.1
+(el `IllegalArgumentException: row indices (start + span) mustn't exceed
+the row count`) y aborda los cinco problemas que quedaron sin resolver o
+que surgieron tras la 4.2.1: el swipe que no respondía a movimientos
+ligeros, la edición de nombres de panel no descubrible, los iconos
+recortados en la BLU C5L Max, el "TurboDL 3" residual en dos pantallas y
+el Home que dejaba la app atascada en el navegador integrado.
+
+## 1. Crash al abrir el menú (H9)
+
+- **Síntoma** (del log que subiste): al tocar el botón de menú dentro del
+  navegador, la app se cierra con `java.lang.IllegalArgumentException:
+  row indices (start + span) mustn't exceed the row count` en
+  `BrowserActivity.renderMenuPages`. Se reproduce 3 veces en el reporte,
+  todas en BLU C5L Max, Android 11, 4.2.1.
+- **Causa raíz**: la tercera página del menú tenía **11 celdas** (🛡🚫🍪🔑👥👁📖🧹👤📌🚪)
+  pero el `GridLayout` solo admite 10 (`MENU_ROWS=2 × MENU_COLUMNS=5`).
+  La celda 11 caía en `row=2`, que excede el `rowCount=2`, y Android 11
+  lanza la excepción al añadirla.
+- **Solución**: el menú ahora es **dinámico**. Las celdas se definen en
+  una lista plana (`allMenuCells()`) y `renderMenuPages` las reparte
+  automáticamente en sub-páginas de 10. Si hay 11 acciones, se crean 2
+  páginas (10 + 1); si hay 25, 3 páginas. Nunca se excede el rowCount, y
+  los puntos del indicador se ajustan al número real de páginas. El
+  campo `MENU_PAGE_COUNT` (constante fija en 3) se sustituye por
+  `menuPageCount`, una propiedad calculada. Un `if (index >=
+  MENU_PER_PAGE) break` actúa de salvaguarda adicional anti-crash.
+
+## 2. Swipe por página completa con umbral bajo (U9, revisado)
+
+Pediste: *"sigo sin tener el comportamiento que quiero de hacer un leve
+movimiento y que se muevan los paneles"*.
+
+- El snap anterior solo disparaba al levantar el dedo (`ACTION_UP`), lo
+  que fallaba con los flings: el `HorizontalScrollView` sigue rodando por
+  inercia cientos de ms después del `ACTION_UP`, y el snap se calculaba
+  con un scrollX intermedio, no el final.
+- **Nuevo enfoque**: al soltar el dedo, un runnable vigilante lee
+  `scrollX` cada 50 ms; cuando deja de cambiar durante 100 ms
+  (scroll detenido), calcula la página destino y la anima con
+  `smoothScrollTo`. Esto cubre tanto el toque simple como el fling.
+- **Umbral bajado al 25%** del ancho (antes 50% vía `round()`): basta
+  deslizar una cuarta parte de la página para saltar a la siguiente. Un
+  "leve movimiento" ya cambia de panel.
+- Aplicado tanto a los paneles de accesos como al menú.
+
+## 3. Renombrar paneles de accesos — ahora descubrible (U11)
+
+Pediste: *"también quiero poder cambiar el título de cada panel … algo
+que no hiciste"*.
+
+- En 4.2.1 el renombrado ya existía (pulsación larga sobre el título),
+  pero no era **descubrible**: no había ningún botón visible que lo
+  indicara.
+- Ahora hay un **botón ✏ explícito** al lado del título del panel
+  (`btnRenamePanel`). Un toque abre el diálogo "Renombrar panel" con el
+  nombre actual precargado; "Guardar" lo persiste por usuario, y
+  "Restaurar" lo devuelve al nombre por defecto.
+- La pulsación larga sobre el título sigue funcionando como atajo.
+
+## 4. Iconos de accesos recortados (U12)
+
+Pediste: *"los iconos no se muestran bien en mi dispositivo, están
+recortados"*.
+
+- En la BLU C5L Max (pantalla ~480×854, ~3.5"), el `item_site.xml` con
+  icono de 40 dp + texto 12 sp + padding 10 dp excedía la altura de
+  celda y recortaba el icono y el nombre.
+- Reducido: padding 10→4 dp, icono 40→32 dp, texto 12→11 sp, margen
+  4→3 dp. El `ImageView` ahora usa `scaleType=centerInside` +
+  `adjustViewBounds=true`, así el favicon siempre cabe sin deformarse.
+  El `FrameLayout` y el `LinearLayout` interno pasan a `match_parent` en
+  alto para que el peso 1f del GridLayout reparta el espacio y la celda
+  no desborde hacia abajo.
+- El monograma (cuando no hay favicon) también se pide a 32 dp para
+  coincidir con el tamaño del `ImageView`.
+
+## 5. "TurboDL 3" residual (U13)
+
+Pediste: *"hay sitios dentro de la interfaz que muestran TurboDL 3 cuando
+debería ser simplemente TurboDL"*.
+
+- `main.xml` (cabecera de MainActivity) decía "TurboDL 3" → ahora
+  "TurboDL".
+- `ToolsActivity.kt` (diálogo "Acerca de") decía "TurboDL 3.0.0" → ahora
+  "TurboDL 4.2.2".
+- No hay más referencias a "TurboDL 3" en el código ni en los recursos.
+
+## 6. Botón Home con dos toques (U10)
+
+Pediste: *"al tocar una vez el Home se reinicie toda la búsqueda y todo
+quede limpio, y cuando le dé otra vez al home vaya a la vista principal
+de la aplicación (ahora me quedo atascado dentro del navegador
+integrado)"*.
+
+- **1er toque** (vista principal oculta): si hay una página cargada, la
+  descarta (`about:blank`), limpia la barra de dirección y los medios
+  detectados de esa pestaña, y muestra la vista principal de accesos.
+  "Todo queda limpio". Si la pestaña ya estaba en blanco, muestra
+  directamente la vista principal.
+- **2º toque** (vista principal visible): la oculta y deja el campo URL
+  vacío y enfocado para una nueva búsqueda.
+- Antes el botón era un toggle que mostraba/ocultaba el overlay sin
+  limpiar la pestaña, por lo que quedabas "atascado" en el navegador con
+  la URL anterior.
+
+## 7. Internas
+
+- `versionCode` 18, `versionName` 4.2.2.
+- `MENU_PAGE_COUNT` (constante) → `menuPageCount` (propiedad calculada
+  a partir de `allMenuCells().size`).
+- `MenuPaginationTest` reescrito (11 casos) blindando el cálculo
+  dinámico de páginas y la regresión del crash (11 celdas = 2 páginas).
+- `SitesPanelsTest` actualizado a las nuevas constantes.
+- 122 tests JVM pasan (0 fallos).
+
+## 8. Instalación
+
+```
+adb install TurboDL-4.2.2.apk
+```
+
+APK de debug firmado con la clave de depuración. Android 8.0+ (API 26).
+
+---
+
 # TurboDL 4.2.1 — Notas de la versión
 
 Fecha: 2026-11-21

@@ -119,11 +119,15 @@ class SitesPanelsTest {
     }
 
     @Test
-    fun `MENU_PAGE_COUNT sigue siendo 3 paginas (snap del menu 4_2_1)`() {
-        assertEquals(3, BrowserActivity.MENU_PAGE_COUNT)
+    fun `MENU_PER_PAGE es 10 celdas (snap del menu 4_2_2)`() {
+        // 4.2.2: el menú ya no tiene un nº fijo de páginas; las celdas se
+        // reparten dinámicamente en páginas de MENU_PER_PAGE = 10.
         assertEquals(5, BrowserActivity.MENU_COLUMNS)
         assertEquals(2, BrowserActivity.MENU_ROWS)
-        // Cada página del menú sigue cabiendo en 10 celdas (5×2).
-        assertEquals(10, BrowserActivity.MENU_COLUMNS * BrowserActivity.MENU_ROWS)
+        assertEquals(10, BrowserActivity.MENU_PER_PAGE)
+        assertEquals(
+            BrowserActivity.MENU_COLUMNS * BrowserActivity.MENU_ROWS,
+            BrowserActivity.MENU_PER_PAGE
+        )
     }
 }

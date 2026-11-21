@@ -34,7 +34,7 @@ class ToolsActivity : Activity() {
         findViewById<Button>(R.id.btnEnc).setOnClickListener { showEncoders() }
 
         findViewById<TextView>(R.id.txtAbout).text =
-            "TurboDL 3.0.0 — gestor de descargas multipropósito\n\n" +
+            "TurboDL 4.2.2 — gestor de descargas multipropósito\n\n" +
             "• HTTP/HTTPS con multihilo y reanudación\n" +
             "• FTP/FTPS, HLS (m3u8) con AES-128, DASH (mpd)\n" +
             "• BitTorrent: magnet y .torrent\n" +

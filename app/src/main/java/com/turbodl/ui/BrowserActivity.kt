@@ -153,16 +153,28 @@ class BrowserActivity : Activity() {
         /** Gris claro para puntos inactivos del paginador. */
         internal val COLOR_DOT_OFF = 0xFFCCCCCC.toInt()
 
-        // ---------------- menú inferior paginado (4.0) ----------------
-        // BUG 1: antes el menú asumaba 2 páginas; aquí se declaran como
-        // constantes para que añadir/eliminar páginas no exija tocar todos
-        // los `for (i in 0 until 3)` repartidos por la clase.
-        /** Número de páginas (submenús) del menú inferior. */
-        internal const val MENU_PAGE_COUNT = 3
+        // ---------------- menú inferior paginado (4.0; dinámico 4.2.2) ----------------
+        // 4.2.2: el menú ya no asume un nº fijo de páginas. Las celdas se
+        // reparten en sub-páginas de MENU_COLUMNS×MENU_ROWS = 10; si hay
+        // más acciones, se añaden páginas automáticamente (igual que los
+        // paneles de accesos). Antes la página 2 tenía 11 celdas y rompía
+        // el GridLayout con `IllegalArgumentException: row indices (start
+        // + span) mustn't exceed the row count` (crash al abrir el menú en
+        // BLU C5L Max, Android 11).
         /** Columnas por página del menú (5 iconos por fila, como Via Browser). */
         internal const val MENU_COLUMNS = 5
         /** Filas por página del menú (10 acciones por página). */
         internal const val MENU_ROWS = 2
+        /** Celdas por página del menú. */
+        internal const val MENU_PER_PAGE = MENU_COLUMNS * MENU_ROWS
+
+        // ---------------- snap por página completa (4.2.2) ----------------
+        // Vigilancia del scroll hasta que se detiene (tras un fling), para
+        // disparar el snap en el momento correcto — no solo al levantar el
+        // dedo. IDLE_DELAY = ms entre lecturas; IDLE_THRESHOLD = ms de
+        // estabilidad necesarios para considerar el scroll "detenido".
+        internal const val IDLE_DELAY = 50L
+        internal const val IDLE_THRESHOLD = 100L
 
         // ---------------- paneles de accesos directos (4.0) ----------------
         /** Número de CATEGORÍAS de accesos (Comunes / IA / Mis sitios).
@@ -582,6 +594,16 @@ class BrowserActivity : Activity() {
         sitesDots = findViewById(R.id.sitesDots)
         txtSitesTitle = findViewById(R.id.txtSitesTitle)
         btnEditSites = findViewById(R.id.btnEditSites)
+        // 4.2.2: botón explícito para renombrar el panel activo (el
+        // long-press sobre el título también funciona, pero no era
+        // descubrible — por eso no veías cómo editar el nombre).
+        findViewById<Button>(R.id.btnRenamePanel).setOnClickListener {
+            if (sitesPanelMap.isNotEmpty()) {
+                val (cat, _) = sitesPanelMap[
+                    sitesPage.coerceIn(0, sitesPanelMap.size - 1)]
+                renamePanelTitle(cat)
+            }
+        }
         fab = findViewById(R.id.btnDetectFab)
         stripScroll = findViewById(R.id.tabsStripScroll)
         strip = findViewById(R.id.tabsStrip)
@@ -605,7 +627,16 @@ class BrowserActivity : Activity() {
                 toast("Carga detenida")
             } else web.reload()
         }
-        findViewById<Button>(R.id.btnHome).setOnClickListener { showHome(!homeOverlay.isVisible()) }
+        // 4.2.2 (U10): botón Home con dos toques.
+        //   1er toque: si hay una página cargada, la "reinicia": limpia
+        //   la barra de dirección, carga about:blank y vuelve a la vista
+        //   principal de accesos. Así no se queda atascado en el navegador
+        //   integrado (lo que reportaste).
+        //   Si la pestaña ya estaba en about:blank/home, el 1er toque ya
+        //   muestra directamente la vista principal.
+        //   2º toque (cuando la vista principal ya está visible): la
+        //   oculta y deja el campo listo para escribir una nueva búsqueda.
+        findViewById<Button>(R.id.btnHome).setOnClickListener { onHomePressed() }
         btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
         btnTabCount.setOnClickListener { showTabSheet() }
@@ -767,7 +798,7 @@ class BrowserActivity : Activity() {
         // 4.0 U3: página activa del menú al deslizar
         menuPager.setOnScrollChangeListener { _, sx, _, _, _ ->
             val w = menuPager.width.coerceAtLeast(1)
-            val np = Math.round(sx / w.toFloat()).coerceIn(0, MENU_PAGE_COUNT - 1)
+            val np = Math.round(sx / w.toFloat()).coerceIn(0, menuPageCount - 1)
             if (np != menuPage) {
                 menuPage = np
                 renderMenuDots()
@@ -1238,6 +1269,62 @@ class BrowserActivity : Activity() {
         }
         updateShield()
         updateDetectBtn()
+    }
+
+    /**
+     * 4.2.2 (U10): comportamiento de dos toques del botón Home.
+     *
+     * Lo que pediste: "al tocar una vez el Home se reinicie toda la
+     * búsqueda y todo quede limpio, y cuando le dé otra vez al home vaya
+     * a la vista principal de la aplicación (ahora me quedo atascado
+     * dentro del navegador integrado)".
+     *
+     *   · Si la vista principal (homeOverlay) NO está visible:
+     *     - Si hay una URL/página cargada: la descarta (about:blank),
+     *       limpia la barra de dirección y muestra la vista principal
+     *       con los paneles de accesos. "Todo queda limpio".
+     *     - Si la pestaña ya está en blanco: muestra directamente la
+     *       vista principal.
+     *   · Si la vista principal YA está visible: la oculta y deja el
+     *     campo URL vacío y enfocado para una nueva búsqueda.
+     */
+    private fun onHomePressed() {
+        if (!homeOverlay.isVisible()) {
+            // 1er toque: volver a la vista principal, limpiando la página.
+            val t = tabs.getOrNull(cur)
+            val hasPage = t != null && t.url.isNotEmpty() && t.url != "about:blank"
+            if (hasPage) {
+                // "Reiniciar la búsqueda": descarga la página actual.
+                try { t?.wv?.loadUrl("about:blank") } catch (e: Exception) { }
+                t?.url = ""
+                t?.title = ""
+                t?.wv?.tag = null
+                // Limpia la lista de medios detectados de esta pestaña.
+                synchronized(detected) {
+                    val uid = t?.uid ?: -1
+                    detected.values.removeAll { it.tabUid == uid }
+                }
+            }
+            // Limpia la barra de dirección y muestra la vista principal.
+            suppressSuggest = true
+            editUrl.setText("")
+            editUrl.hint = "Página de inicio"
+            suppressSuggest = false
+            findViewById<Button>(R.id.btnClear).visibility = View.GONE
+            showHome(true)
+            editUrl.requestFocus()
+            showKb()
+        } else {
+            // 2º toque: ocultar la vista principal y dejar el campo listo
+            // para escribir una nueva URL/búsqueda.
+            showHome(false)
+            suppressSuggest = true
+            editUrl.setText("")
+            suppressSuggest = false
+            findViewById<Button>(R.id.btnClear).visibility = View.GONE
+            editUrl.requestFocus()
+            showKb()
+        }
     }
 
     private fun hideKb() {
@@ -2222,8 +2309,10 @@ class BrowserActivity : Activity() {
         val url = entry.substringAfter('|')
         val host = hostOf(url)
         val icon = v.findViewById<ImageView>(R.id.siteIcon)
+        // 4.2.2: monograma a 32dp (igual que el ImageView del layout) para
+        // que el favicon no recorte en pantallas pequeñas (BLU C5L Max).
         icon.setImageBitmap(Favicons.cached(this@BrowserActivity, host)
-            ?: Favicons.monogram(host, dp(40)))
+            ?: Favicons.monogram(host, dp(32)))
         if (host.isNotEmpty()) {
             Favicons.fetchAsync(this@BrowserActivity, host) { b ->
                 if (b != null) runOnUiThread {
@@ -2405,25 +2494,77 @@ class BrowserActivity : Activity() {
     }
 
     /**
-     * 4.2.1 (U9): snap a la página más cercana tras un swipe. Calcula la
-     * página destino a partir del scroll X actual (página = round(sx / w))
-     * y usa `smoothScrollTo` para animar el encaje. Se protege con
-     * `sitesSnapBusy` para no reentrar si el usuario vuelve a tocar antes
-     * de que termine la animación (la animación de snap dispara más
-     * eventos de scroll, que sin el guardameta re-snappearían).
+     * 4.2.2 (U9): snap a página completa con umbral bajo. Lo que pediste:
+     * "hacer un leve movimiento y que se muevan los paneles".
+     *
+     *  · Umbral del 25% del ancho (no 50%): basta deslizar una cuarta
+     *    parte de la página para saltar a la siguiente/anterior.
+     *  · El snap no se dispara solo en ACTION_UP: tras el fling, el
+     *    ScrollView sigue rodando por inercia. Vigilamos el scrollX con
+     *    un runnable (cada ~50 ms) hasta que se estabiliza, y entonces
+     *    encajamos en la página destino. Así un flick ligero siempre
+     *    termina en una página entera, sin importar dónde quedó el fling.
+     *  · `sitesSnapBusy` evita reentrar si el usuario vuelve a tocar.
      */
     private fun scheduleSitesSnap() {
         if (sitesSnapBusy) return
-        val w = sitesPager.width.coerceAtLeast(1)
-        val target = Math.round(sitesPager.scrollX / w.toFloat())
-            .coerceIn(0, (sitesPanelMap.size - 1).coerceAtLeast(0))
-        if (target == sitesPage && Math.abs(sitesPager.scrollX - target * w) < 5) return
         sitesSnapBusy = true
-        sitesPage = target
-        sitesPager.smoothScrollTo(target * w, 0)
-        renderSitesDots()
-        updateSitesTitle()
-        sitesPager.postDelayed({ sitesSnapBusy = false }, 350)
+        // Vigilamos el scroll hasta que se detenga (el scrollX no cambia
+        // entre dos lecturas separadas por IDLE_DELAY ms), y entonces
+        // encajamos. Esto cubre tanto el toque simple (se para en seco)
+        // como el fling (inercia de varios cientos de ms).
+        val w = sitesPager.width.coerceAtLeast(1)
+        var lastSx = sitesPager.scrollX
+        var stable = 0L
+        val tick = object : Runnable {
+            override fun run() {
+                val sx = sitesPager.scrollX
+                if (sx == lastSx) {
+                    stable += IDLE_DELAY
+                    if (stable >= IDLE_THRESHOLD) {
+                        // El scroll se detuvo: encajar a la página destino
+                        // con umbral bajo (25% del ancho, no 50%).
+                        val current = sitesPage
+                        val target = sitesSnapTarget(sx, w, current)
+                        if (target != current) {
+                            sitesPage = target
+                            sitesPager.smoothScrollTo(target * w, 0)
+                            renderSitesDots()
+                            updateSitesTitle()
+                        } else if (Math.abs(sx - target * w) > 2) {
+                            // No cambió de página pero quedó algo descentrado:
+                            // reajustar para que quede perfectamente alineada.
+                            sitesPager.smoothScrollTo(target * w, 0)
+                        }
+                        sitesPager.postDelayed({ sitesSnapBusy = false }, 350)
+                        return
+                    }
+                } else {
+                    stable = 0
+                    lastSx = sx
+                }
+                sitesPager.postDelayed(this, IDLE_DELAY)
+            }
+        }
+        sitesPager.postDelayed(tick, IDLE_DELAY)
+    }
+
+    /**
+     * Página destino del snap con umbral bajo: si el scroll pasó del
+     * 25% del ancho hacia la página siguiente (o anterior), salta a ella.
+     * Si no, se queda en la actual. Esto hace que un "leve movimiento"
+     * baste para cambiar de panel (lo que pediste), frente al round()
+     * anterior que necesitaba cruzar el 50%.
+     */
+    private fun sitesSnapTarget(sx: Int, w: Int, current: Int): Int {
+        val max = (sitesPanelMap.size - 1).coerceAtLeast(0)
+        val base = current * w
+        val delta = sx - base
+        return when {
+            delta > w / 4 -> (current + 1).coerceIn(0, max)
+            delta < -(w / 4) -> (current - 1).coerceIn(0, max)
+            else -> current.coerceIn(0, max)
+        }
     }
 
     /** Título del sub-panel activo: nombre de la categoría + sufijo "· 2"
@@ -3258,8 +3399,7 @@ class BrowserActivity : Activity() {
         val active: Boolean = false, val action: () -> Unit)
 
     /** Menú inferior en PÁGINAS DESLIZABLES (4.0): swipe izquierda/derecha
-     *  cambia de página; los puntos reflejan y permiten saltar. 3 páginas
-     *  × 10 acciones, todas reales. */
+     *  cambia de página; los puntos reflejan y permiten saltar. */
     private fun showMenuSheet() {
         hideSheets()
         renderMenuPages()
@@ -3271,7 +3411,7 @@ class BrowserActivity : Activity() {
         menuPager.post {
             if (menuPager.width > 0) {
                 renderMenuPages()
-                menuPager.scrollTo(menuPage.coerceIn(0, MENU_PAGE_COUNT - 1) * menuPager.width, 0)
+                menuPager.scrollTo(menuPage.coerceIn(0, menuPageCount - 1) * menuPager.width, 0)
             }
         }
     }
@@ -3293,31 +3433,38 @@ class BrowserActivity : Activity() {
         // Ancho de cada página = ancho del paginador (0 la primera vez; el
         // post() de showMenuSheet repinta tras medir).
         val pageWidth = menuPager.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
-        for (p in 0 until MENU_PAGE_COUNT) {
+        val total = menuPageCount
+        for (p in 0 until total) {
             val page = android.widget.GridLayout(this)
             page.columnCount = MENU_COLUMNS
             page.rowCount = MENU_ROWS
             page.setPadding(dp(6), dp(4), dp(6), dp(4))
-            // LayoutParams del GridLayout dentro del LinearLayout horizontal:
-            // ancho fijo = ancho del paginador, alto = MATCH_PARENT.
             val gridLp = LinearLayout.LayoutParams(pageWidth, ViewGroup.LayoutParams.MATCH_PARENT)
             page.layoutParams = gridLp
             val cells = menuCells(p)
             // Posiciona cada celda en su (col, row) para que el peso 1f del
-            // GridLayout reparta uniformemente el ancho y el alto.
+            // GridLayout reparta uniformemente el ancho y el alto. 4.2.2:
+            // solo se añaden las celdas que existen (si la última página
+            // tiene menos de 10, las que falten quedan como huecos vacíos
+            // — ya no excedemos rowCount y el GridLayout no crashea).
             for ((index, cell) in cells.withIndex()) {
+                if (index >= MENU_PER_PAGE) break   // salvaguarda anti-crash
                 val col = index % MENU_COLUMNS
                 val row = index / MENU_COLUMNS
                 page.addView(menuCell(cell, col, row))
             }
             menuPages.addView(page)
         }
+        // Si la página activa ya no existe (p.ej. había 4 y ahora hay 3),
+        // la acotamos.
+        menuPage = menuPage.coerceIn(0, total - 1)
         renderMenuDots()
     }
 
     private fun renderMenuDots() {
         menuDots.removeAllViews()
-        for (i in 0 until MENU_PAGE_COUNT) {
+        val total = menuPageCount
+        for (i in 0 until total) {
             val dot = TextView(this)
             dot.text = "•"
             dot.textSize = 18f
@@ -3329,80 +3476,123 @@ class BrowserActivity : Activity() {
     }
 
     private fun jumpMenuPage(i: Int) {
-        menuPage = i.coerceIn(0, MENU_PAGE_COUNT - 1)
+        menuPage = i.coerceIn(0, menuPageCount - 1)
         val w = menuPager.width.coerceAtLeast(1)
         menuPager.smoothScrollTo(menuPage * w, 0)
-        // BUG 1: antes no se repintaban los puntos al saltar; el indicador
-        // se quedaba en la página anterior hasta que el usuario soltaba el
-        // gesto. Repintamos en cuanto cambia el estado.
         renderMenuDots()
     }
 
-    /** 4.2.1 (U9): snap a la página de menú más cercana tras un swipe. */
+    /** 4.2.2 (U9): snap a la página de menú más cercana, con umbral bajo
+     *  (25% del ancho) y vigilancia del scroll hasta que se detiene tras
+     *  un fling. Misma lógica que `scheduleSitesSnap`. */
     private fun scheduleMenuSnap() {
         if (menuSnapBusy) return
-        val w = menuPager.width.coerceAtLeast(1)
-        val target = Math.round(menuPager.scrollX / w.toFloat())
-            .coerceIn(0, MENU_PAGE_COUNT - 1)
-        if (target == menuPage && Math.abs(menuPager.scrollX - target * w) < 5) return
         menuSnapBusy = true
-        menuPage = target
-        menuPager.smoothScrollTo(target * w, 0)
-        renderMenuDots()
-        menuPager.postDelayed({ menuSnapBusy = false }, 350)
+        val w = menuPager.width.coerceAtLeast(1)
+        var lastSx = menuPager.scrollX
+        var stable = 0L
+        val tick = object : Runnable {
+            override fun run() {
+                val sx = menuPager.scrollX
+                if (sx == lastSx) {
+                    stable += IDLE_DELAY
+                    if (stable >= IDLE_THRESHOLD) {
+                        val current = menuPage
+                        val target = menuSnapTarget(sx, w, current)
+                        if (target != current) {
+                            menuPage = target
+                            menuPager.smoothScrollTo(target * w, 0)
+                            renderMenuDots()
+                        } else if (Math.abs(sx - target * w) > 2) {
+                            menuPager.smoothScrollTo(target * w, 0)
+                        }
+                        menuPager.postDelayed({ menuSnapBusy = false }, 350)
+                        return
+                    }
+                } else {
+                    stable = 0
+                    lastSx = sx
+                }
+                menuPager.postDelayed(this, IDLE_DELAY)
+            }
+        }
+        menuPager.postDelayed(tick, IDLE_DELAY)
     }
 
-    /** Las tres páginas del menú: navegación, herramientas y privacidad.
+    private fun menuSnapTarget(sx: Int, w: Int, current: Int): Int {
+        val max = menuPageCount - 1
+        val base = current * w
+        val delta = sx - base
+        return when {
+            delta > w / 4 -> (current + 1).coerceIn(0, max)
+            delta < -(w / 4) -> (current - 1).coerceIn(0, max)
+            else -> current.coerceIn(0, max)
+        }
+    }
+
+    /** Las páginas del menú: navegación, herramientas y privacidad.
      *  Los elementos con estado activo se pintan en color de acento. */
-    private fun menuCells(page: Int): List<MenuCell> {
+    /** Todas las celdas del menú, en orden. `renderMenuPages` las reparte
+     *  automáticamente en sub-páginas de MENU_PER_PAGE (10). Esto evita el
+     *  crash de la 4.2.1 cuando una página tenía 11 celdas y rompía el
+     *  GridLayout (`row indices exceed row count`). */
+    private fun allMenuCells(): List<MenuCell> {
         val t = tabs.getOrNull(cur)
         val pageUrl = t?.url ?: ""
-        return when (page) {
-            0 -> listOf(
-                MenuCell("🌙", "Modo nocturno", active = Ui.isDark(this)) { toggleDarkTheme() },
-                MenuCell("⭐", "Marcadores") { hideSheets(); showBookmarks() },
-                MenuCell("🕘", "Historial") { hideSheets(); showPageHistory() },
-                MenuCell("⬇", "Detectados") { hideSheets(); showDetected() },
-                MenuCell("🕵", "Incógnito") { newTab("", privateTab = true); hideSheets() },
-                MenuCell("↗", "Compartir") { hideSheets(); sharePage() },
-                MenuCell("☆+", "Añadir marcador") { addBookmark(pageUrl, web.title ?: ""); hideSheets() },
-                MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPages() },
-                MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
-                MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) }
-            )
-            1 -> listOf(
-                MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
-                MenuCell("🗒", "Notas") { hideSheets(); showNotes() },
-                MenuCell("📤", "Exportar") { hideSheets(); showExportDialog() },
-                MenuCell("📦", "Guardar offline") { hideSheets(); saveCurrentOffline() },
-                MenuCell("🗄", "Págs. guardadas") { hideSheets(); showSavedPages() },
-                MenuCell("🔬", "Ver código") { hideSheets(); showSource() },
-                MenuCell("⌨", "Consola JS") { hideSheets(); showJsConsole() },
-                MenuCell("📡", "Registro red") { hideSheets(); showNetLog() },
-                MenuCell("🖼", "Ventana flot.") { hideSheets(); enterPip() },
-                MenuCell("🔎", "Escanear medios") { hideSheets(); inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") }
-            )
-            else -> listOf(
-                MenuCell("🛡", "Bloqueador", active = eng.sp.getBoolean("adblock", true)) {
-                    val nv = !eng.sp.getBoolean("adblock", true)
-                    eng.sp.edit().putBoolean("adblock", nv).apply()
-                    toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
-                    updateShield()
-                    tabs.forEach { it.wv?.reload() }
-                    renderMenuPages()
-                },
-                MenuCell("🚫", "Eximir sitio") { hideSheets(); toggleSiteExempt(pageUrl) },
-                MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
-                MenuCell("🔑", "Credenciales") { hideSheets(); showCredsDialog() },
-                MenuCell("👥", "Usuarios") { hideSheets(); showUsersDialog() },
-                MenuCell("👁", "Sandbox") { hideSheets(); showSandboxViewer() },
-                MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPages() },
-                MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
-                MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
-                MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPages() },
-                MenuCell("🚪", "Salir") { finishAffinity() }
-            )
-        }
+        return listOf(
+            // --- navegación / página ---
+            MenuCell("🌙", "Modo nocturno", active = Ui.isDark(this)) { toggleDarkTheme() },
+            MenuCell("⭐", "Marcadores") { hideSheets(); showBookmarks() },
+            MenuCell("🕘", "Historial") { hideSheets(); showPageHistory() },
+            MenuCell("⬇", "Detectados") { hideSheets(); showDetected() },
+            MenuCell("🕵", "Incógnito") { newTab("", privateTab = true); hideSheets() },
+            MenuCell("↗", "Compartir") { hideSheets(); sharePage() },
+            MenuCell("☆+", "Añadir marcador") { addBookmark(pageUrl, web.title ?: ""); hideSheets() },
+            MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPages() },
+            MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
+            MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) },
+            // --- herramientas ---
+            MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
+            MenuCell("🗒", "Notas") { hideSheets(); showNotes() },
+            MenuCell("📤", "Exportar") { hideSheets(); showExportDialog() },
+            MenuCell("📦", "Guardar offline") { hideSheets(); saveCurrentOffline() },
+            MenuCell("🗄", "Págs. guardadas") { hideSheets(); showSavedPages() },
+            MenuCell("🔬", "Ver código") { hideSheets(); showSource() },
+            MenuCell("⌨", "Consola JS") { hideSheets(); showJsConsole() },
+            MenuCell("📡", "Registro red") { hideSheets(); showNetLog() },
+            MenuCell("🖼", "Ventana flot.") { hideSheets(); enterPip() },
+            MenuCell("🔎", "Escanear medios") { hideSheets(); inject(DEEP_SCAN_JS); toast("Escaneando medios de la página…") },
+            // --- privacidad / cuenta ---
+            MenuCell("🛡", "Bloqueador", active = eng.sp.getBoolean("adblock", true)) {
+                val nv = !eng.sp.getBoolean("adblock", true)
+                eng.sp.edit().putBoolean("adblock", nv).apply()
+                toast(if (nv) "Bloqueador activado" else "Bloqueador apagado")
+                updateShield()
+                tabs.forEach { it.wv?.reload() }
+                renderMenuPages()
+            },
+            MenuCell("🚫", "Eximir sitio") { hideSheets(); toggleSiteExempt(pageUrl) },
+            MenuCell("🍪", "Limpiar datos") { hideSheets(); clearPrivacy() },
+            MenuCell("🔑", "Credenciales") { hideSheets(); showCredsDialog() },
+            MenuCell("👥", "Usuarios") { hideSheets(); showUsersDialog() },
+            MenuCell("👁", "Sandbox") { hideSheets(); showSandboxViewer() },
+            MenuCell("📖", "Lector", active = readerMode) { toggleReader(); renderMenuPages() },
+            MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
+            MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
+            MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPages() },
+            MenuCell("🚪", "Salir") { finishAffinity() }
+        )
+    }
+
+    /** Número total de páginas del menú (calculado dinámicamente). */
+    private val menuPageCount: Int
+        get() = ((allMenuCells().size + MENU_PER_PAGE - 1) / MENU_PER_PAGE).coerceAtLeast(1)
+
+    private fun menuCells(page: Int): List<MenuCell> {
+        val all = allMenuCells()
+        val from = page * MENU_PER_PAGE
+        val to = minOf(all.size, from + MENU_PER_PAGE)
+        return if (from >= to) emptyList() else all.subList(from, to)
     }
 
     /**

@@ -1,10 +1,55 @@
-# TurboDL 4.2.1
+# TurboDL 4.2.2
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.2 — crash del menú arreglado, swipe sensible, iconos sin recorte, "TurboDL 3" corregido, Home con dos toques
+
+La 4.2.2 corrige el crash al abrir el menú (`IllegalArgumentException: row
+indices exceed row count`), el swipe que no respondía a movimientos ligeros,
+los iconos recortados en la BLU C5L Max, el "TurboDL 3" residual y el Home que
+dejaba la app atascada en el navegador integrado.
+
+### 🐛 Crash al abrir el menú (H9, arreglado)
+La página 3 del menú tenía 11 celdas pero el GridLayout solo admite 10 (2×5);
+la celda 11 caía en `row=2`, que excede `rowCount`, y Android 11 cerraba la
+app. Ahora el menú es dinámico: las celdas se reparten en sub-páginas de 10
+automáticamente (11 celdas = 2 páginas, 25 = 3 páginas). Nunca se excede el
+rowCount.
+
+### 📱 Swipe sensible (umbral 25%)
+El snap anterior solo disparaba en `ACTION_UP` y fallaba con flings. Ahora un
+runnable vigila `scrollX` hasta que se detiene y entonces encaja la página,
+con umbral bajado al 25% del ancho (antes 50%): basta un "leve movimiento"
+para cambiar de panel. Aplicado a paneles de accesos y menú.
+
+### ✏ Renombrar panel — botón ✏ visible
+El renombrado existía (long-press) pero no era descubrible. Ahora hay un
+botón ✏ al lado del título del panel; un toque abre el diálogo de renombrar.
+
+### 🖼 Iconos sin recorte
+`item_site` compactado (padding 10→4dp, icono 40→32dp, texto 12→11sp) con
+`scaleType=centerInside` + `adjustViewBounds`. Los favicons ya no se recortan
+en pantallas pequeñas (BLU C5L Max).
+
+### 📛 "TurboDL 3" corregido
+La cabecera de MainActivity y el diálogo "Acerca de" decían "TurboDL 3" /
+"TurboDL 3.0.0". Ahora "TurboDL" / "TurboDL 4.2.2".
+
+### 🏠 Home con dos toques
+1er toque: descarta la página actual (about:blank), limpia la barra y muestra
+la vista principal. 2º toque: oculta la vista principal y deja el campo listo
+para una nueva búsqueda. Ya no se queda atascado en el navegador integrado.
+
+### 📦 Internas
+- versionCode 18, versionName 4.2.2.
+- `MENU_PAGE_COUNT` (constante) → `menuPageCount` (propiedad calculada).
+- 122 tests JVM pasan (0 fallos).
+
+---
 
 ## Novedades de la 4.2.1 — crash del detector arreglado, swipe por página completa, paneles sin desbordamiento y renombrables
 
