@@ -1,3 +1,94 @@
+# TurboDL 4.2.3 — Notas de la versión
+
+Fecha: 2026-11-21
+
+Esta versión reorganiza la página de inicio del navegador, hace que el swipe
+entre paneles sea muy sensible e inmediato, y añade un botón para volver
+rápido a la vista principal.
+
+## 1. Página de inicio sin logo ni buscador duplicado (U14)
+
+Pediste: *"elimina el icono enorme y la barra de búsquedas que está debajo.
+Solo deja la barra de búsqueda superior para que haya más espacio para el
+panel de accesos directos, además los dos elementos son redundantes"*.
+
+- Eliminado el `ImageView` de 64 dp con el icono de la app y el `EditText`
+  `homeSearch` que había debajo en el `homeOverlay`. Ambos eran
+  redundantes con la barra superior (`editUrl`), que siempre visible
+  cumple la misma función.
+- El `LinearLayout` vertical que los contenía también se quita, de modo
+  que el `HorizontalScrollView` de paneles de accesos (`sitesPager`) ahora
+  ocupa todo el espacio vertical disponible bajo el título del panel. En
+  pantallas pequeñas (BLU C5L Max) los accesos directos ganan ~120 dp de
+  altura extra: caben más filas y dejan de verse recortados.
+- Se elimina la variable `homeSearch` y todo su cableado (listener de
+  edición, listener de foco que sincronizaba con `editUrl`). La barra
+  superior ya hace esa sincronización.
+
+## 2. Swipe muy sensible e inmediato (U9, redefinido)
+
+Pediste: *"que sea muy sensible el movimiento de swipe para cambiar de
+paneles/pestañas y que con un pequeño gesto rápidamente se cambie de
+ventanas. Además que la transición entre paneles sea bien rápida/dura y
+pase de manera inmediata. Quiero este comportamiento para la parte de
+accesos directos y para el menú del navegador"*.
+
+- El esquema anterior (4.2.2) usaba un runnable que vigilaba `scrollX`
+  cada 50 ms hasta que se estabilizaba 100 ms y entonces encajaba con
+  `smoothScrollTo` (animación de ~300 ms). Eso era lento y se notaba.
+- **Nuevo enfoque con `GestureDetector`**: cada pager (accesos y menú)
+  tiene ahora un `GestureDetector` que intercepta el `onFling`. Si la
+  velocidad horizontal supera `FLING_VEL_MIN = 300 px/s` (muy baja, un
+  flick mínimo cuenta), salta a la página siguiente/anterior
+  **INMEDIATAMENTE** con `scrollTo()` (sin animación). El evento se
+  consume para que el `HorizontalScrollView` no haga su propia inercia.
+- **Umbral bajado al 10%**: si no hubo fling (arrastre lento), al soltar
+  el dedo se encaja a la página siguiente si el desplazamiento superó el
+  10% del ancho (`SNAP_THRESHOLD_FRACTION = 0.10f`), frente al 25% de
+  4.2.2 y al 50% de 4.2.1. Basta deslizar una décima parte de la página.
+- **`scrollTo` en vez de `smoothScrollTo`**: la transición es al instante,
+  "rápida y dura", sin deslizamiento animado.
+- Aplicado a los dos pagers: `sitesPager` (paneles de accesos directos)
+  y `menuPager` (menú inferior del navegador).
+
+## 3. Botón para volver a la vista principal (U15)
+
+Pediste: *"dentro del navegador añade un botón/icono para volver rápido
+al menú principal de la aplicación (vista principal cuando abres la
+aplicación)"*.
+
+- Nuevo botón `btnMainHome` en la barra inferior del navegador, entre
+  `btnHome` (🏠) y el contador de pestañas. Icono: ▶ (cuadrado/triángulo).
+- A diferencia de `btnHome` (que en 4.2.2 hace dos toques: 1º reinicia
+  la búsqueda y carga about:blank, 2º muestra la vista principal), este
+  botón va **directo e inmediato** a la vista principal en un solo toque:
+  muestra el `homeOverlay` con los paneles de accesos sin tocar la pestaña
+  actual. Si ya está visible, la oculta.
+- Así tienes dos caminos: `btnHome` para "reiniciar y volver a la home",
+  `btnMainHome` para "volver a la home sin tocar lo que tengo cargado".
+
+## 4. Internas
+
+- `versionCode` 19, `versionName` 4.2.3.
+- Nuevas constantes en `companion`: `FLING_VEL_MIN = 300f`,
+  `SNAP_THRESHOLD_FRACTION = 0.10f`. Las anteriores `IDLE_DELAY` /
+  `IDLE_THRESHOLD` quedan sin uso (la vigilancia del scroll se elimina).
+- Nuevos campos: `sitesPagerGesture`, `menuPagerGesture`
+  (`GestureDetector` por `lazy`), `snapPagerInstant(pager, isMenu,
+  forward)`.
+- `homeSearch` eliminado (variable + listeners).
+- 122 tests JVM pasan (0 fallos).
+
+## 5. Instalación
+
+```
+adb install TurboDL-4.2.3.apk
+```
+
+APK de debug firmado con la clave de depuración. Android 8.0+ (API 26).
+
+---
+
 # TurboDL 4.2.2 — Notas de la versión
 
 Fecha: 2026-11-21

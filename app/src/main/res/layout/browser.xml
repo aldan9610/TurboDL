@@ -111,7 +111,11 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- ============ página de inicio (estilo Via Browser 4.0) ============ -->
+        <!-- ============ página de inicio (estilo Via Browser 4.0) ============
+             4.2.3: eliminado el icono enorme (64dp) y la barra homeSearch
+             que había debajo. Ambos eran redundantes: la barra superior
+             (editUrl) ya hace la misma función. Sin ellos el panel de
+             accesos directos gana todo el espacio vertical. -->
         <LinearLayout
             android:id="@+id/homeOverlay"
             android:layout_width="match_parent"
@@ -119,38 +123,6 @@
             android:background="?android:attr/colorBackground"
             android:orientation="vertical"
             android:visibility="gone">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_horizontal"
-                android:orientation="vertical"
-                android:paddingTop="34dp">
-
-                <ImageView
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:contentDescription="TurboDL"
-                    android:src="@mipmap/ic_launcher" />
-
-                <EditText
-                    android:id="@+id/homeSearch"
-                    android:layout_width="match_parent"
-                    android:layout_height="50dp"
-                    android:layout_marginLeft="28dp"
-                    android:layout_marginTop="22dp"
-                    android:layout_marginRight="28dp"
-                    android:background="@drawable/pill_bg"
-                    android:hint="Buscar o escribir dirección"
-                    android:imeOptions="actionGo"
-                    android:inputType="textUri"
-                    android:paddingLeft="22dp"
-                    android:paddingRight="22dp"
-                    android:singleLine="true"
-                    android:textColor="#212121"
-                    android:textColorHint="#9E9E9E"
-                    android:textSize="15sp" />
-            </LinearLayout>
 
             <!-- título del panel de accesos activo + botón de edición -->
             <LinearLayout
@@ -427,6 +399,22 @@
             android:layout_weight="1"
             android:contentDescription="Inicio"
             android:text="&#8962;"
+            android:textColor="#212121"
+            android:textSize="20sp" />
+
+        <!-- 4.2.3: botón explícito para volver rápido a la vista principal
+             de la aplicación (los paneles de accesos directos). A
+             diferencia de btnHome (que reinicia la búsqueda y luego va
+             a la vista principal en dos toques), este botón va directo
+             e inmediato a la vista principal en un solo toque. -->
+        <Button
+            android:id="@+id/btnMainHome"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:contentDescription="Volver a la vista principal"
+            android:text="&#9636;"
             android:textColor="#212121"
             android:textSize="20sp" />
 

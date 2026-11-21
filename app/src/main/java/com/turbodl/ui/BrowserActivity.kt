@@ -176,6 +176,16 @@ class BrowserActivity : Activity() {
         internal const val IDLE_DELAY = 50L
         internal const val IDLE_THRESHOLD = 100L
 
+        // 4.2.3 (U9): swipe MUY sensible e inmediato.
+        //   · FLING_VEL_MIN: velocidad mínima (px/s) para que un fling
+        //     cuente como cambio de página. Baja (300 px/s) para que un
+        //     "pequeño gesto" dispare el cambio.
+        //   · SNAP_THRESHOLD_FRACTION: fracción del ancho de página que
+        //     hay que desplazar al soltar el dedo para saltar a la
+        //     siguiente/previa. 0.10f = 10% (muy sensible).
+        internal const val FLING_VEL_MIN = 300f
+        internal const val SNAP_THRESHOLD_FRACTION = 0.10f
+
         // ---------------- paneles de accesos directos (4.0) ----------------
         /** Número de CATEGORÍAS de accesos (Comunes / IA / Mis sitios).
          *  Cada categoría se reparte en uno o varios sub-paneles visibles
@@ -443,7 +453,7 @@ class BrowserActivity : Activity() {
     private var tabsGridAdapter: BaseAdapter? = null
     private var tabsGridDlg: android.app.Dialog? = null
     // hojas inferiores y sugerencias (interfaz 4.0, estilo navegador mínimo)
-    private lateinit var homeSearch: android.widget.EditText
+    // 4.2.3: homeSearch eliminado (redundante con editUrl).
     private lateinit var suggestionsHost: LinearLayout
     private lateinit var suggestionsList: android.widget.ListView
     private lateinit var tabSheet: LinearLayout
@@ -465,6 +475,31 @@ class BrowserActivity : Activity() {
     private lateinit var fab: Button
     private var sitesPage = 0          // sub-panel visible actualmente
     private var sitesSnapBusy = false  // 4.2.1: evita reentrancia en el snap
+    /** 4.2.3 (U9): detector de gestos del pager de accesos. Intercepta
+     *  el fling horizontal para saltar de página INMEDIATAMENTE (sin
+     *  smoothScrollTo), con umbral muy bajo. */
+    private val sitesPagerGesture: android.view.GestureDetector by lazy {
+        android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, vx: Float, vy: Float): Boolean {
+                if (Math.abs(vx) < FLING_VEL_MIN) return false
+                snapPagerInstant(sitesPager, isMenu = false, forward = vx < 0f)
+                return true
+            }
+            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean = false
+        })
+    }
+    /** 4.2.3 (U9): detector de gestos del pager del menú. Igual que el de
+     *  accesos pero para el menú inferior. */
+    private val menuPagerGesture: android.view.GestureDetector by lazy {
+        android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, vx: Float, vy: Float): Boolean {
+                if (Math.abs(vx) < FLING_VEL_MIN) return false
+                snapPagerInstant(menuPager, isMenu = true, forward = vx < 0f)
+                return true
+            }
+            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean = false
+        })
+    }
     private var editSites = false
     /** Sub-paneles activos: cada entrada dice a qué categoría (0..2) pertenece
      *  y qué "página" dentro de esa categoría es (0-based). Lo construye
@@ -637,6 +672,16 @@ class BrowserActivity : Activity() {
         //   2º toque (cuando la vista principal ya está visible): la
         //   oculta y deja el campo listo para escribir una nueva búsqueda.
         findViewById<Button>(R.id.btnHome).setOnClickListener { onHomePressed() }
+        // 4.2.3: botón explícito "volver a la vista principal". A
+        // diferencia de btnHome (dos toques: 1º reinicia la búsqueda,
+        // 2º va a la vista principal), este botón va DIRECTO e
+        // inmediato a la vista principal en un solo toque. No toca la
+        // pestaña actual: solo muestra el homeOverlay con los paneles
+        // de accesos. Si ya está visible, lo oculta.
+        findViewById<Button>(R.id.btnMainHome).setOnClickListener {
+            if (homeOverlay.isVisible()) showHome(false)
+            else showHome(true)
+        }
         btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
         btnTabCount.setOnClickListener { showTabSheet() }
@@ -706,28 +751,10 @@ class BrowserActivity : Activity() {
         }
         setupHistoryBar()
 
-        // buscador grande de la página de inicio (estilo 4.0)
-        homeSearch = findViewById(R.id.homeSearch)
-        homeSearch.setOnEditorActionListener { _, _, _ ->
-            val q = homeSearch.text.toString().trim()
-            if (q.isNotEmpty()) {
-                load(if (q.contains("://") || q.contains("."))
-                    (if (q.contains("://")) q else "https://$q")
-                    else Profiles.engineUrl(eng.sp, q))
-                hideKb()
-            }
-            true
-        }
-        // 4.0 U1: al tocar el buscador central, el texto pasa a la barra
-        // superior (siempre visible sobre el teclado, nunca tapada)
-        homeSearch.setOnFocusChangeListener { _, has ->
-            if (has) {
-                editUrl.setText(homeSearch.text.toString())
-                editUrl.requestFocus()
-                editUrl.setSelection(editUrl.text.length)
-                showKb()
-            }
-        }
+        // 4.2.3: eliminado el buscador grande de la página de inicio
+        // (homeSearch). Era redundante con la barra superior editUrl, que
+        // siempre visible hace la misma función. Al quitarlo el panel de
+        // accesos directos gana todo el espacio vertical.
         // hojas inferiores: pestañas y menú
         tabSheet = findViewById(R.id.tabSheet)
         tabListHost = findViewById(R.id.tabListHost)
@@ -772,18 +799,36 @@ class BrowserActivity : Activity() {
                 updateSitesTitle()
             }
         }
-        sitesPager.setOnTouchListener { _, ev ->
-            when (ev.actionMasked) {
-                android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL -> {
-                    // 4.2.1 (U9): snap a la página más cercana al soltar el
-                    // dedo. Sin esto el pager quedaba entre dos páginas
-                    // (scroll fluido). El umbral es la mitad de la página;
-                    // si se desplazó más, salta a la siguiente/previa.
-                    scheduleSitesSnap()
-                }
+        // 4.2.3 (U9, redefinido): swipe MUY sensible e inmediato.
+        // Se sustituye el esquema anterior (runnable que espera 100ms de
+        // scroll estable + smoothScrollTo) por detección de fling con
+        // GestureDetector + scrollTo instantáneo. Lo que pidió el usuario:
+        // "que sea muy sensible el movimiento de swipe … con un pequeño
+        // gesto rápidamente se cambie de ventanas … la transición sea
+        // bien rápida/dura y pase de manera inmediata".
+        //   · onFling (GestureDetector): si la velocidad horizontal supera
+        //     FLING_VEL_MIN, salta a la página siguiente/anterior
+        //     INMEDIATAMENTE (sin animación) y consume el evento para que
+        //     el ScrollView no haga su propio fling.
+        //   · onUp (ACTION_UP): si NO hubo fling (arrastre lento), el
+        //     ScrollView ya movió el contenido; al soltar, encaja a la
+        //     página según el umbral del 10%. scrollTo instantáneo.
+        sitesPager.setOnTouchListener { v, ev ->
+            // Primero dejamos que el GestureDetector evalúe el fling.
+            val handled = sitesPagerGesture.onTouchEvent(ev)
+            // Al soltar el dedo: si NO hubo fling (snapBusy sigue false),
+            // encajar según el desplazamiento. Si hubo fling, snapPagerInstant
+            // ya puso snapBusy=true y saltó la página, así que ignoramos
+            // este encaje (el scrollX es el previo y nos llevaría a la
+            // página equivocada).
+            if ((ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
+                 ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) && !sitesSnapBusy) {
+                scheduleSitesSnap()
             }
-            false   // no consumir: deja que el ScrollView haga su fling
+            // Si el detector consumió el evento (hubo fling), no
+            // propagamos al ScrollView para que no ruede por inercia.
+            v.parent?.requestDisallowInterceptTouchEvent(handled)
+            handled
         }
         // 4.2.1: pulsación larga sobre el título del panel → renombrar la
         // categoría activa. (También accesible desde el menú contextual de
@@ -804,13 +849,15 @@ class BrowserActivity : Activity() {
                 renderMenuDots()
             }
         }
-        // 4.2.1: snap por página completa también en el menú.
-        menuPager.setOnTouchListener { _, ev ->
-            when (ev.actionMasked) {
-                android.view.MotionEvent.ACTION_UP,
-                android.view.MotionEvent.ACTION_CANCEL -> scheduleMenuSnap()
+        // 4.2.3 (U9, redefinido): mismo swipe inmediato en el menú.
+        menuPager.setOnTouchListener { v, ev ->
+            val handled = menuPagerGesture.onTouchEvent(ev)
+            if ((ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
+                 ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) && !menuSnapBusy) {
+                scheduleMenuSnap()
             }
-            false
+            v.parent?.requestDisallowInterceptTouchEvent(handled)
+            handled
         }
 
         readerMode = eng.sp.getBoolean("readerMode", false)
@@ -2494,76 +2541,94 @@ class BrowserActivity : Activity() {
     }
 
     /**
-     * 4.2.2 (U9): snap a página completa con umbral bajo. Lo que pediste:
-     * "hacer un leve movimiento y que se muevan los paneles".
+     * 4.2.3 (U9, redefinido): snap a página completa INMEDIATO y muy
+     * sensible. Lo que pediste: "que sea muy sensible el movimiento de
+     * swipe … con un pequeño gesto rápidamente se cambie de ventanas …
+     * la transición sea bien rápida/dura y pase de manera inmediata".
      *
-     *  · Umbral del 25% del ancho (no 50%): basta deslizar una cuarta
-     *    parte de la página para saltar a la siguiente/anterior.
-     *  · El snap no se dispara solo en ACTION_UP: tras el fling, el
-     *    ScrollView sigue rodando por inercia. Vigilamos el scrollX con
-     *    un runnable (cada ~50 ms) hasta que se estabiliza, y entonces
-     *    encajamos en la página destino. Así un flick ligero siempre
-     *    termina en una página entera, sin importar dónde quedó el fling.
-     *  · `sitesSnapBusy` evita reentrar si el usuario vuelve a tocar.
+     *  · Umbral del 10% del ancho (SNAP_THRESHOLD_FRACTION = 0.10f):
+     *    basta deslizar una décima parte de la página para saltar a la
+     *    siguiente/anterior. Un "pequeño gesto" basta.
+     *  · scrollTo() (no smoothScrollTo): la transición es al instante,
+     *    sin animación de deslizamiento de ~300ms. "Dura e inmediata".
+     *  · El fling rápido lo maneja el GestureDetector (sitesPagerGesture)
+     *    vía snapPagerInstant(), que también usa scrollTo instantáneo.
+     *  · Esta función se llama al soltar el dedo (ACTION_UP) cuando NO
+     *    hubo fling (arrastre lento): encaja según cuánto se desplazó.
      */
     private fun scheduleSitesSnap() {
         if (sitesSnapBusy) return
-        sitesSnapBusy = true
-        // Vigilamos el scroll hasta que se detenga (el scrollX no cambia
-        // entre dos lecturas separadas por IDLE_DELAY ms), y entonces
-        // encajamos. Esto cubre tanto el toque simple (se para en seco)
-        // como el fling (inercia de varios cientos de ms).
         val w = sitesPager.width.coerceAtLeast(1)
-        var lastSx = sitesPager.scrollX
-        var stable = 0L
-        val tick = object : Runnable {
-            override fun run() {
-                val sx = sitesPager.scrollX
-                if (sx == lastSx) {
-                    stable += IDLE_DELAY
-                    if (stable >= IDLE_THRESHOLD) {
-                        // El scroll se detuvo: encajar a la página destino
-                        // con umbral bajo (25% del ancho, no 50%).
-                        val current = sitesPage
-                        val target = sitesSnapTarget(sx, w, current)
-                        if (target != current) {
-                            sitesPage = target
-                            sitesPager.smoothScrollTo(target * w, 0)
-                            renderSitesDots()
-                            updateSitesTitle()
-                        } else if (Math.abs(sx - target * w) > 2) {
-                            // No cambió de página pero quedó algo descentrado:
-                            // reajustar para que quede perfectamente alineada.
-                            sitesPager.smoothScrollTo(target * w, 0)
-                        }
-                        sitesPager.postDelayed({ sitesSnapBusy = false }, 350)
-                        return
-                    }
-                } else {
-                    stable = 0
-                    lastSx = sx
-                }
-                sitesPager.postDelayed(this, IDLE_DELAY)
-            }
+        val sx = sitesPager.scrollX
+        val current = sitesPage
+        val target = sitesSnapTarget(sx, w, current)
+        if (target != current) {
+            sitesPage = target
+            sitesPager.scrollTo(target * w, 0)
+            renderSitesDots()
+            updateSitesTitle()
+        } else if (Math.abs(sx - target * w) > 2) {
+            // No cambió de página pero quedó descentrado: reajustar al
+            // instante (sin animación).
+            sitesPager.scrollTo(target * w, 0)
         }
-        sitesPager.postDelayed(tick, IDLE_DELAY)
     }
 
-    /**
-     * Página destino del snap con umbral bajo: si el scroll pasó del
-     * 25% del ancho hacia la página siguiente (o anterior), salta a ella.
-     * Si no, se queda en la actual. Esto hace que un "leve movimiento"
-     * baste para cambiar de panel (lo que pediste), frente al round()
-     * anterior que necesitaba cruzar el 50%.
-     */
+    /** Página destino del snap con umbral del 10%: si el scroll pasó del
+     *  10% del ancho hacia la página siguiente (o anterior), salta. */
     private fun sitesSnapTarget(sx: Int, w: Int, current: Int): Int {
         val max = (sitesPanelMap.size - 1).coerceAtLeast(0)
         val base = current * w
         val delta = sx - base
+        val thr = (w * SNAP_THRESHOLD_FRACTION).toInt().coerceAtLeast(1)
         return when {
-            delta > w / 4 -> (current + 1).coerceIn(0, max)
-            delta < -(w / 4) -> (current - 1).coerceIn(0, max)
+            delta > thr -> (current + 1).coerceIn(0, max)
+            delta < -thr -> (current - 1).coerceIn(0, max)
             else -> current.coerceIn(0, max)
+        }
+    }
+
+    /**
+     * 4.2.3 (U9): salto de página INMEDIATO disparado por el detector de
+     * fling. Lo usan los dos pagers (accesos y menú). Cálculo del destino:
+     *   · forward = true  → página siguiente (el usuario deslizó a la
+     *     izquierda, vx < 0).
+     *   · forward = false → página anterior.
+     * La transición es con scrollTo() (instantánea, sin animación) para
+     * que el cambio de panel sea "rápido y duro" como pidió el usuario.
+     */
+    private fun snapPagerInstant(
+        pager: HorizontalScrollView,
+        isMenu: Boolean,
+        forward: Boolean
+    ) {
+        if (isMenu) {
+            if (menuSnapBusy) return
+            menuSnapBusy = true
+            val w = pager.width.coerceAtLeast(1)
+            val max = menuPageCount - 1
+            val target = if (forward) (menuPage + 1) else (menuPage - 1)
+            val t = target.coerceIn(0, max)
+            if (t != menuPage) {
+                menuPage = t
+                pager.scrollTo(t * w, 0)
+                renderMenuDots()
+            }
+            pager.postDelayed({ menuSnapBusy = false }, 250)
+        } else {
+            if (sitesSnapBusy) return
+            sitesSnapBusy = true
+            val w = pager.width.coerceAtLeast(1)
+            val max = (sitesPanelMap.size - 1).coerceAtLeast(0)
+            val target = if (forward) (sitesPage + 1) else (sitesPage - 1)
+            val t = target.coerceIn(0, max)
+            if (t != sitesPage) {
+                sitesPage = t
+                pager.scrollTo(t * w, 0)
+                renderSitesDots()
+                updateSitesTitle()
+            }
+            pager.postDelayed({ sitesSnapBusy = false }, 250)
         }
     }
 
@@ -3482,50 +3547,32 @@ class BrowserActivity : Activity() {
         renderMenuDots()
     }
 
-    /** 4.2.2 (U9): snap a la página de menú más cercana, con umbral bajo
-     *  (25% del ancho) y vigilancia del scroll hasta que se detiene tras
-     *  un fling. Misma lógica que `scheduleSitesSnap`. */
+    /** 4.2.3 (U9, redefinido): snap del menú INMEDIATO y muy sensible.
+     *  Misma lógica que `scheduleSitesSnap`: umbral 10% + scrollTo (sin
+     *  animación). El fling rápido lo maneja menuPagerGesture. */
     private fun scheduleMenuSnap() {
         if (menuSnapBusy) return
-        menuSnapBusy = true
         val w = menuPager.width.coerceAtLeast(1)
-        var lastSx = menuPager.scrollX
-        var stable = 0L
-        val tick = object : Runnable {
-            override fun run() {
-                val sx = menuPager.scrollX
-                if (sx == lastSx) {
-                    stable += IDLE_DELAY
-                    if (stable >= IDLE_THRESHOLD) {
-                        val current = menuPage
-                        val target = menuSnapTarget(sx, w, current)
-                        if (target != current) {
-                            menuPage = target
-                            menuPager.smoothScrollTo(target * w, 0)
-                            renderMenuDots()
-                        } else if (Math.abs(sx - target * w) > 2) {
-                            menuPager.smoothScrollTo(target * w, 0)
-                        }
-                        menuPager.postDelayed({ menuSnapBusy = false }, 350)
-                        return
-                    }
-                } else {
-                    stable = 0
-                    lastSx = sx
-                }
-                menuPager.postDelayed(this, IDLE_DELAY)
-            }
+        val sx = menuPager.scrollX
+        val current = menuPage
+        val target = menuSnapTarget(sx, w, current)
+        if (target != current) {
+            menuPage = target
+            menuPager.scrollTo(target * w, 0)
+            renderMenuDots()
+        } else if (Math.abs(sx - target * w) > 2) {
+            menuPager.scrollTo(target * w, 0)
         }
-        menuPager.postDelayed(tick, IDLE_DELAY)
     }
 
     private fun menuSnapTarget(sx: Int, w: Int, current: Int): Int {
         val max = menuPageCount - 1
         val base = current * w
         val delta = sx - base
+        val thr = (w * SNAP_THRESHOLD_FRACTION).toInt().coerceAtLeast(1)
         return when {
-            delta > w / 4 -> (current + 1).coerceIn(0, max)
-            delta < -(w / 4) -> (current - 1).coerceIn(0, max)
+            delta > thr -> (current + 1).coerceIn(0, max)
+            delta < -thr -> (current - 1).coerceIn(0, max)
             else -> current.coerceIn(0, max)
         }
     }

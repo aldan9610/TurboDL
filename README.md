@@ -1,10 +1,40 @@
-# TurboDL 4.2.2
+# TurboDL 4.2.3
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.2.3 — página de inicio sin logo, swipe inmediato, botón de vista principal
+
+La 4.2.3 reorganiza la página de inicio del navegador, hace que el swipe entre
+paneles sea muy sensible e inmediato, y añade un botón para volver rápido a la
+vista principal.
+
+### 🧹 Página de inicio sin logo ni buscador duplicado
+Eliminado el icono de 64dp y la barra `homeSearch` del `homeOverlay`. Ambos eran
+redundantes con la barra superior `editUrl`. Sin ellos, el panel de accesos
+directos gana todo el espacio vertical (~120dp extra en pantallas pequeñas).
+
+### 📱 Swipe muy sensible e inmediato (GestureDetector + scrollTo)
+El esquema anterior (vigilar scrollX + smoothScrollTo) era lento. Ahora cada
+pager usa un `GestureDetector` que intercepta el `onFling`: si la velocidad
+horizontal supera 300 px/s, salta de página INMEDIATAMENTE con `scrollTo()` (sin
+animación). El umbral al soltar el dedo baja al 10% del ancho (antes 25%).
+Aplicado a paneles de accesos y al menú del navegador.
+
+### 🏠 Botón de volver a la vista principal
+Nuevo botón `btnMainHome` (▶) en la barra inferior, entre Home y pestañas. Va
+directo e inmediato a la vista principal en un solo toque, sin tocar la
+pestaña actual (a diferencia de Home que reinicia la búsqueda).
+
+### 📦 Internas
+- versionCode 19, versionName 4.2.3.
+- Nuevas constantes: `FLING_VEL_MIN = 300f`, `SNAP_THRESHOLD_FRACTION = 0.10f`.
+- 122 tests JVM pasan (0 fallos).
+
+---
 
 ## Novedades de la 4.2.2 — crash del menú arreglado, swipe sensible, iconos sin recorte, "TurboDL 3" corregido, Home con dos toques
 
