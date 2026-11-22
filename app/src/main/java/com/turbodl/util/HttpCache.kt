@@ -230,11 +230,10 @@ object HttpCache {
                         trim(d)
                     } catch (e: Throwable) { }
                 }
-                return WebResourceResponse(mime, charset, ByteArrayInputStream(bytes)).also {
-                    it.responseHeaders = headers
-                    it.statusCode = status
-                    it.reasonPhrase = "OK"
-                }
+                // Constructor de 6 args (API 21+): mimeType, encoding,
+                // statusCode, reasonPhrase, responseHeaders, inputStream.
+                return WebResourceResponse(
+                    mime, charset, status, "OK", headers, ByteArrayInputStream(bytes))
             }
             return null
         } catch (e: Throwable) {
@@ -255,11 +254,10 @@ object HttpCache {
         val headers = LinkedHashMap<String, String>()
         val h = meta.optJSONObject("headers")
         if (h != null) h.keys().forEach { headers[it] = h.getString(it) }
-        return WebResourceResponse(mime, charset, ByteArrayInputStream(bytes)).also {
-            it.responseHeaders = headers
-            it.statusCode = 200
-            it.reasonPhrase = reason
-        }
+        // Constructor de 5 args (API 21+): fija statusCode y reasonPhrase
+        // en la construcción; mimeType y encoding van como setters existentes.
+        return WebResourceResponse(
+            mime, charset, 200, reason, headers, ByteArrayInputStream(bytes))
     }
 
     private fun parseHttpDate(s: String?): Long {
