@@ -6,7 +6,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
-import com.turbodl.adblock.AdblockPlusEngine;
 import com.turbodl.adblock.FilterEngine;
 
 import java.io.File;
@@ -18,22 +17,29 @@ import java.net.URL;
 import java.util.Locale;
 
 /**
- * Fachada del bloqueador de anuncios (4.1).
+ * Fachada del bloqueador de anuncios (4.9).
  *
- * <p>La versión 4.1 introduce un <b>cambio de prioridad</b>: el motor
- * primario es ahora la librería madura de Adblock Plus
- * (<code>libadblockplus-android</code>, el binding JNI del C++ que
- * usan las extensiones oficiales ABP de escritorio desde 2013). El
- * motor 100% Kotlin <code>FilterEngine</code> (añadido en 3.6.0)
- * sigue en el APK y se usa como <b>fallback automático</b> cuando la
- * AAR no está presente o no se pudo inicializar (lo que ocurre si
- * jcenter no resuelve el artefacto en el entorno de build). En
- * runtime la elección es transparente para el navegador:
- * <code>shouldBlock</code> consulta primero al motor oficial; si
- * responde, su respuesta es la buena; si no está listo, cae al
- * motor Kotlin; si tampoco, a la lista compacta de hosts.</p>
+ * <p>El motor es 100% Kotlin ({@link FilterEngine} + {@code HostsAdapter}).
+ * La 4.9 elimina el wrapper muerto de la librería nativa Adblock Plus
+ * (libadblockplus-android, V8, ~30 MB) cuya AAR dejó de resolverse al
+ * retirarse jcenter en 2021: siempre devolvía "no instalado" sin aportar
+ * nada, y confundía al usuario con el mensaje "Adblock Plus no
+ * instalado" cuando el bloqueo sí funcionaba (lo hacía FilterEngine).</p>
  *
- * <p>Robustez heredada de 3.5.x:</p>
+ * <p>4.9: el usuario ELIGE el motor en Ajustes → Navegador → Motor de
+ * bloqueo (preferencia {@code adblockEngine} en SharedPreferences "cfg"):</p>
+ * <ul>
+ *   <li><b>"kotlin"</b> (default): {@link FilterEngine} carga TODAS las
+ *       listas seleccionadas (EasyList, EasyPrivacy, AdGuard, Fanboy,
+ *       EasyList Spanish…) con reglas de red + cosméticos, y las tipo
+ *       hosts (StevenBlack) vía {@code HostsAdapter}. Bloqueo completo.</li>
+ *   <li><b>"hosts"</b>: solo se cargan las listas {@code Format.HOSTS}
+ *       del catálogo, convertidas a EasyList. Modo mínimo: ligero, sin
+ *       cosméticos, sin falsos positivos, pero solo bloquea dominios
+ *       enteros (sin reglas finas de red ni ocultamiento de elementos).</li>
+ * </ul>
+ *
+ * <p>Robustez heredada de 3.5.x–4.1:</p>
  * <ul>
  *   <li>Todos los accesos al motor van con <code>catch(Throwable)</code>:
  *       ningún <code>Error</code> detiene la navegación.</li>
@@ -43,8 +49,6 @@ import java.util.Locale;
  *       a 256 KB.</li>
  *   <li>Self-test con URLs limpias antes de marcar READY; si falla, el
  *       navegador usa la lista compacta de hosts.</li>
- *   <li>MODO POR RAM: < 1,5 GB solo EasyList (lite, ~10 MB); en adelante
- *       EasyList + EasyPrivacy (~20 MB).</li>
  *   <li>Un fusible del navegador pausa el motor si bloqueara una
  *       proporción anómala de peticiones.</li>
  *   <li><code>ensure()</code> solo se llama con el bloqueador ACTIVADO;
@@ -76,6 +80,36 @@ public final class AdBlockEngine {
     /** Motivo por el que el motor no está disponible (para diagnóstico). */
     private static volatile String motivo = "";
 
+    /** 4.9: motor elegido por el usuario en Ajustes.
+     *  "kotlin" = FilterEngine con todas las listas (default);
+     *  "hosts"  = solo listas Format.HOSTS vía HostsAdapter. */
+    public static final String ENGINE_KOTLIN = "kotlin";
+    public static final String ENGINE_HOSTS = "hosts";
+
+    /** Devuelve el motor elegido ("kotlin" o "hosts"); nunca null. */
+    public static String selectedEngine(Context ctx) {
+        String s = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+            .getString("adblockEngine", ENGINE_KOTLIN);
+        return ENGINE_HOSTS.equals(s) ? ENGINE_HOSTS : ENGINE_KOTLIN;
+    }
+
+    /** 4.9: cambia el motor y fuerza la recarga en segundo plano.
+     *  Llamar desde el hilo UI tras el cambio en Ajustes. Si el
+     *  bloqueador está apagado, solo persiste la preferencia (init()
+     *  correrá cuando se active). */
+    public static void setEngine(Context ctx, String engineId) {
+        String val = ENGINE_HOSTS.equals(engineId) ? ENGINE_HOSTS : ENGINE_KOTLIN;
+        ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+            .edit().putString("adblockEngine", val).apply();
+        if (activado(ctx)) {
+            synchronized (LOCK) {
+                state = STATE_INIT;
+                engine = null;
+            }
+            ensure(ctx);
+        }
+    }
+
     /** Nombres de archivo de listas en assets/adblock y filesDir/adblock. */
     private static final String[] LISTAS = {"easylist.txt", "easyprivacy.txt"};
     private static final String[] URL_LISTAS = {
@@ -96,34 +130,19 @@ public final class AdBlockEngine {
 
     /**
      * Lanza la inicialización una sola vez (en segundo plano).
-     *
-     * 4.1: primero intenta cargar el motor oficial de Adblock Plus
-     * (libadblockplus-android). Si la AAR no está presente o falla al
-     * inicializarse, continúa con el motor 100% Kotlin (FilterEngine)
-     * que ya estaba integrado. La transición es invisible para el
-     * navegador.
+     * 4.9: solo queda FilterEngine; el motor se elige en Ajustes
+     * (kotlin/hosts) y {@link #init} filtra las listas según el modo.
      */
     public static void ensure(Context ctx) {
-        // Intento 1: motor oficial Adblock Plus (con timeout interno).
-        try {
-            AdblockPlusEngine.ensure(ctx);
-        } catch (Throwable e) {
-            Log.w("AdBlockEngine", "Adblock Plus no disponible: " + e);
-        }
-        // Intento 2: motor 100% Kotlin (siempre que el oficial no esté
-        // ya listo o siga cargando). Si el oficial acaba de llegar, lo
-        // dejamos como primario y no cargamos también EasyList en RAM.
-        if (!AdblockPlusEngine.ready()) {
+        if (state != STATE_INIT) return;
+        synchronized (LOCK) {
             if (state != STATE_INIT) return;
-            synchronized (LOCK) {
-                if (state != STATE_INIT) return;
-                Thread t = new Thread(() -> {
-                    try { init(ctx); } catch (Throwable e) { fallo(e); }
-                });
-                t.setDaemon(true);
-                t.setName("adblock-init");
-                t.start();
-            }
+            Thread t = new Thread(() -> {
+                try { init(ctx); } catch (Throwable e) { fallo(e); }
+            });
+            t.setDaemon(true);
+            t.setName("adblock-init");
+            t.start();
         }
     }
 
@@ -155,11 +174,19 @@ public final class AdBlockEngine {
         // easyprivacy), se copia desde assets; si no, se salta. Las listas
         // tipo hosts pasan por HostsAdapter que las convierte a sintaxis
         // EasyList (||host^) para que FilterEngine las entienda.
+        // 4.9: en modo "hosts" SOLO se cargan las listas Format.HOSTS del
+        // catálogo (ignorando las EasyList que el usuario tenga marcadas),
+        // para un bloqueo mínimo por dominio. En modo "kotlin" se cargan
+        // todas las seleccionadas (EasyList + hosts).
+        boolean modoHosts = ENGINE_HOSTS.equals(selectedEngine(ctx));
         java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
             com.turbodl.adblock.AdblockCatalog.selected(ctx);
         StringBuilder sb = new StringBuilder();
         int cargadas = 0;
         for (com.turbodl.adblock.AdblockCatalog.Entry e : sel) {
+            // 4.9: en modo hosts, saltar las listas que no son HOSTS.
+            if (modoHosts && e.format != com.turbodl.adblock.AdblockCatalog.Format.HOSTS)
+                continue;
             File f = new File(d, e.id + ".txt");
             // si la lista no existe en disco, intentamos copiarla desde
             // assets (easylist y easyprivacy vienen embebidos en el APK).
@@ -187,7 +214,10 @@ public final class AdBlockEngine {
         // Si por la razón que sea ninguna lista se cargó (todas fallaron),
         // caer a los assets clásicos easylist+easyprivacy si existen,
         // para no dejar el motor vacío y romper el self-test.
-        if (cargadas == 0) {
+        // 4.9: en modo "hosts" este fallback no aplica (no tendría sentido
+        // cargar EasyList cuando el usuario eligió solo hosts); en ese
+        // caso se reporta fallo y el navegador usará su lista compacta.
+        if (cargadas == 0 && !modoHosts) {
             for (String n : LISTAS) {
                 File f = new File(d, n);
                 if (!f.exists() || f.length() < 1000) {
@@ -256,38 +286,40 @@ public final class AdBlockEngine {
     }
 
     /**
-     * true si HAY un motor listo para responder (4.1): primero el
-     * oficial de Adblock Plus; si no, el 100% Kotlin. El navegador usa
-     * este método para decidir entre la API del motor y la lista
-     * compacta de hosts.
+     * true si HAY un motor listo para responder (4.9): solo FilterEngine
+     * (modo kotlin o hosts, ambos corren sobre el mismo FilterEngine con
+     * listas distintas). El navegador usa este método para decidir entre
+     * la API del motor y la lista compacta de hosts.
      */
     public static boolean ready() {
-        return AdblockPlusEngine.ready() || (state == STATE_READY && engine != null);
+        return state == STATE_READY && engine != null;
     }
 
     /**
-     * true si TODOS los motores fallaron y hay que usar la lista
-     * compacta de hosts. (4.1: la lista de hosts es ahora el tercer
-     * y último nivel de fallback.)
+     * true si el motor falló y hay que usar la lista compacta de hosts
+     * del navegador (tercer y último nivel de fallback).
      */
     public static boolean caido() {
-        return AdblockPlusEngine.unavailable() && state == STATE_FALLIDO;
+        return state == STATE_FALLIDO;
     }
 
     /** Fusible anti-sobre-bloqueo: pausa el motor por esta sesión y deja solo
      *  la lista de hosts. Lo llama el navegador si el motor bloquea una
      *  proporción anómala de peticiones (p. ej. todas las imágenes). */
     public static void deshabilitarSesion() {
-        // 4.1: el fusible desactiva AMBOS motores; al volver a activar
-        // desde Ajustes se reintenta la inicialización.
-        try { AdblockPlusEngine.shutdown(); } catch (Throwable e) { }
         fallo(new Exception("fusible: proporción de bloqueo anómala"));
+    }
+
+    /** 4.9: nombre legible del motor elegido, para UI y diagnóstico. */
+    public static String engineName(Context ctx) {
+        return ENGINE_HOSTS.equals(selectedEngine(ctx))
+            ? "Solo hosts" : "FilterEngine (Kotlin)";
     }
 
     /**
      * Resumen legible del estado para el panel de diagnóstico del
-     * navegador (4.1): muestra primero el motor oficial Adblock Plus,
-     * después el 100% Kotlin y por último la lista de hosts.
+     * navegador (4.9): muestra el motor elegido y su estado, sin el
+     * mensaje confuso "Adblock Plus no instalado" de la 4.1-4.8.
      */
     public static String diagnostico(Context ctx) {
         StringBuilder sb = new StringBuilder();
@@ -298,6 +330,7 @@ public final class AdBlockEngine {
             sb.append("- Motor: no se carga (bloqueador apagado)");
             return sb.toString();
         }
+        sb.append("- Motor: ").append(engineName(ctx)).append('\n');
         sb.append("- Sitios con bloqueo desactivado: ").append(exemptCount()).append('\n');
         // 4.2: listas seleccionadas por el usuario
         java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
@@ -312,20 +345,18 @@ public final class AdBlockEngine {
             }
             sb.append('\n');
         }
-        // 4.1: motor oficial Adblock Plus (libadblockplus-android).
-        sb.append("- Motor oficial: ").append(AdblockPlusEngine.statusLine()).append('\n');
-        // Motor 100% Kotlin (FilterEngine) — fallback.
+        // 4.9: estado del motor (sin mención a Adblock Plus).
         if (state == STATE_READY) {
             FilterEngine eng = engine;
-            sb.append("- Motor Kotlin (fallback): LISTO");
+            sb.append("- Estado: LISTO");
             if (eng != null) sb.append(" (").append(eng.getNetworkRules()).append(" reglas)");
             sb.append('\n');
         } else if (state == STATE_FALLIDO) {
-            sb.append("- Motor Kotlin (fallback): NO EN USO (")
-                .append(motivo == null || motivo.isEmpty() ? "no disponible" : motivo)
+            sb.append("- Estado: NO DISPONIBLE (")
+                .append(motivo == null || motivo.isEmpty() ? "error de carga" : motivo)
                 .append(")\n- Filtrando con la lista básica de hosts (≈0 MB de RAM)\n");
         } else {
-            sb.append("- Motor Kotlin (fallback): cargando…\n");
+            sb.append("- Estado: cargando…\n");
         }
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
@@ -436,26 +467,14 @@ public final class AdBlockEngine {
     /**
      * true si el subrecurso debe bloquearse. Sin motor (no listo o caído)
      * devuelve false SIEMPRE: fallar es dejar pasar, no bloquear de más.
-     *
-     * <p>4.1: consulta primero al motor oficial Adblock Plus. Si está
-     * listo y responde, su decisión es la definitiva. Si no está listo
-     * (cargando) o no está presente, cae al motor 100% Kotlin. Si
-     * tampoco, devuelve false (el navegador usará su lista compacta de
-     * hosts en el caller).</p>
+     * 4.9: solo FilterEngine (modo kotlin o hosts); el motor oficial ABP
+     * se eliminó.
      */
     public static boolean shouldBlock(String pageUrl, String reqUrl, String type) {
         if (!httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return false;
         try {
             // sitio con el bloqueo desactivado por el usuario: dejar pasar todo
             if (exempted(pageUrl)) return false;
-            // Intento 1: motor oficial Adblock Plus (libadblockplus-android).
-            if (AdblockPlusEngine.ready()) {
-                boolean block = AdblockPlusEngine.shouldBlock(pageUrl, reqUrl, type);
-                // El wrapper devuelve false si no está seguro (placeholder
-                // conservador). En ese caso, caemos al fallback Kotlin.
-                if (block) return true;
-            }
-            // Intento 2: motor 100% Kotlin (FilterEngine).
             FilterEngine eng = engine;
             if (eng == null) return false;
             // orden del motor: (recurso pedido, página, tipo). El frame
@@ -467,18 +486,11 @@ public final class AdBlockEngine {
     }
 
     /** Patrón de la regla que bloquearía reqUrl (para el escudo del
-     *  navegador). 4.1: primero el motor oficial; si no, el Kotlin.
-     *  Vacío si ningún motor está listo o la URL no se bloquea. */
+     *  navegador). Vacío si el motor no está listo o la URL no se bloquea. */
     public static String ruleFor(String pageUrl, String reqUrl, String type) {
         if (!httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return "";
         try {
             if (exempted(pageUrl)) return "";
-            // Intento 1: motor oficial.
-            if (AdblockPlusEngine.ready()) {
-                String rule = AdblockPlusEngine.ruleFor(pageUrl, reqUrl, type);
-                if (rule != null && !rule.isEmpty()) return rule;
-            }
-            // Intento 2: motor Kotlin.
             FilterEngine eng = engine;
             if (eng == null) return "";
             String p = eng.debugMatch(reqUrl, pageUrl, type);
@@ -489,23 +501,19 @@ public final class AdBlockEngine {
     }
 
     /** CSS cosmético (ocultar elementos) para la página; vacío si no hay.
-     *  4.1: primero el motor oficial; si no, el Kotlin. Llamar desde un
-     *  hilo de fondo; el resultado se limita a 256 KB. */
+     *  Llamar desde un hilo de fondo; el resultado se limita a 256 KB.
+     *  4.9: en modo "hosts" el motor no tiene cosméticos (solo reglas de
+     *  red por dominio), así que esto devuelve "" naturalmente — el
+     *  motor se cargó solo con listas HOSTS y FilterEngine.cssFor no
+     *  encuentra selectores. */
     public static String cssFor(String pageUrl) {
         if (!httpLimpia(pageUrl)) return "";
         try {
             if (exempted(pageUrl)) return "";
-            // Intento 1: motor oficial.
-            if (AdblockPlusEngine.ready()) {
-                String css = AdblockPlusEngine.cssFor(pageUrl);
-                if (css != null && !css.isEmpty()) return css;
-            }
-            // Intento 2: motor Kotlin.
             FilterEngine eng = engine;
             if (eng == null) return "";
             String css = eng.cssFor(pageUrl, CSS_MAX);
-            if (css == null) return "";
-            return css;
+            return css == null ? "" : css;
         } catch (Throwable e) {
             return "";
         }
@@ -537,10 +545,18 @@ public final class AdBlockEngine {
             try {
                 File d = dir(ctx);
                 d.mkdirs();
+                // 4.9: en modo "hosts" solo se descargan las listas
+                // Format.HOSTS del catálogo (las EasyList se ignoran para
+                // no gastar datos en listas que init() no va a cargar).
+                boolean modoHosts = ENGINE_HOSTS.equals(selectedEngine(ctx));
                 java.util.List<com.turbodl.adblock.AdblockCatalog.Entry> sel =
                     com.turbodl.adblock.AdblockCatalog.selected(ctx);
                 totalN = sel.size();
                 for (com.turbodl.adblock.AdblockCatalog.Entry e : sel) {
+                    if (modoHosts && e.format != com.turbodl.adblock.AdblockCatalog.Format.HOSTS) {
+                        totalN--;
+                        continue;
+                    }
                     File dest = new File(d, e.id + ".txt");
                     // las listas tipo hosts no tienen cabecera [Adblock;
                     // descarga las admite igual porque StevenBlack trae un

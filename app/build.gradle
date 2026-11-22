@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 27
-        versionName "4.8"
+        versionCode 28
+        versionName "4.9"
     }
 
     signingConfigs {
@@ -101,29 +101,14 @@ dependencies {
     // minSdk 26 sigue: setProxyOverride se ignora en <9, donde el proxy del
     // navegador es el del sistema (sin proxy propio) — documentado en UI.
     implementation 'androidx.webkit:webkit:1.11.0'
-    // 4.1: bloqueador de anuncios maduro de Adblock Plus (libadblockplus-android).
-    //
-    // IMPORTANTE: la AAR se publicaba en jcenter, retirado en 2021. Los
-    // mirrors probados (Alibaba, jcenter.bintray.com, maven.eyeo.com) no
-    // resuelven `org.adblockplus:adblock-android:4.5.0` en el sandbox de
-    // build; por eso las dos líneas siguientes están COMENTADAS para que la
-    // app compile.
-    //
-    // El wrapper `AdblockPlusEngine.kt` carga la AAR por reflexión: si la
-    // clase `org.adblockplus.libadblockplus.android.AdblockHelper` no está
-    // en el classpath (este caso), todos sus métodos devuelven false/"" y
-    // el fallback `FilterEngine` 100% Kotlin responde. Es decir, con o sin
-    // la AAR la app compila y bloquea anuncios; con la AAR se usaría el
-    // motor oficial de Adblock Plus.
-    //
-    // Para habilitar el motor oficial en tu entorno: instala la AAR
-    // manualmente en `app/libs/` (descargándola de
-    // https://github.com/adblockplus/libadblockplus-android/releases o
-    // construyéndola con `./gradlew assembleAbi_arm64` del repo oficial)
-    // y descomenta las dos líneas siguientes.
-    //
-    // implementation 'org.adblockplus:adblock-android:4.5.0'
-    // implementation 'org.adblockplus:adblock-android-webview:4.5.0'
+    // 4.9: el motor de bloqueo es 100% Kotlin (FilterEngine + HostsAdapter).
+    // El wrapper de la librería nativa Adblock Plus (libadblockplus-android,
+    // V8, ~30 MB) se eliminó: la AAR se publicaba en jcenter (retirado en
+    // 2021) y ningún mirror la resuelve, así que `AdblockPlusEngine.kt`
+    // siempre devolvía "no instalado" sin aportar nada. Sin la lib nativa
+    // el APK pesa menos y el diagnóstico deja de ser confuso. El usuario
+    // elige entre FilterEngine (EasyList + cosméticos) y Solo hosts en
+    // Ajustes → Navegador → Motor de bloqueo.
     // JUnit solo para los tests JVM del motor de bloqueo (no entra en el APK)
     testImplementation 'junit:junit:4.13.2'
     // 4.3: Robolectric para tests JVM que tocan SQLite (NotesDb) sin

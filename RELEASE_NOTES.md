@@ -1,3 +1,83 @@
+# TurboDL 4.9 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Selector de motor de bloqueo + fix del "Adblock no instalado"
+
+Pediste: *"investiga los motores de bloqueo disponibles… la app dice que
+Adblock no está instalado, y quiero elegir el motor en Ajustes"*. La 4.9
+elimina el código muerto del motor oficial de Adblock Plus (que nunca
+llegó a empaquetarse) y añade un selector real con dos motores.
+
+### Por qué decía "Adblock no instalado" (y ya no lo dice)
+
+El proyecto tenía un wrapper (`AdblockPlusEngine.kt`) que cargaba por
+reflexión la librería nativa `libadblockplus-android` (el motor oficial
+de Adblock Plus, que usa V8). Esa librería se publicaba en `jcenter`,
+que cerró en 2021; ningún mirror la resuelve, así que las dependencias
+llevaban años comentadas en el `build.gradle`. El wrapper siempre
+detectaba "no instalado" y el navegador mostraba
+**"Adblock Plus no instalado (modo FilterEngine)"** aunque el bloqueo
+sí funcionara — lo hacía `FilterEngine`, el motor Kotlin.
+
+Lo que cambié:
+- **Eliminé `AdblockPlusEngine.kt`** (280 líneas de código muerto) y las
+  9 referencias que tenía en `AdBlockEngine.java`.
+- El diagnóstico ya **no menciona Adblock Plus**: ahora dice
+  `Motor: FilterEngine (Kotlin)` o `Motor: Solo hosts`, con el estado
+  real (LISTO / NO DISPONIBLE / cargando).
+
+### Selector de motor en Ajustes → Navegador → 🧱 Motor de bloqueo
+
+Dos motores reales, elegibles por el usuario:
+
+| Motor | Qué carga | Pros | Contras |
+|---|---|---|---|
+| **FilterEngine (Kotlin)** (recomendado, default) | Todas las listas seleccionadas: EasyList, Easy Privacy, AdGuard, Fanboy, EasyList Spanish + hosts (StevenBlack) | Bloqueo de red + cosméticos (ocultar elementos), reglas finas | Más reglas en RAM (~10–20 MB) |
+| **Solo hosts** | Solo listas `Format.HOSTS` (StevenBlack) | Mínimo, sin falsos positivos, ideal para RAM baja | Solo bloquea dominios enteros; sin cosméticos ni reglas finas |
+
+Al cambiar el motor, se persiste en `SharedPreferences("cfg")` clave
+`adblockEngine` y se **recarga en segundo plano** (no hace falta
+reiniciar). En modo "Solo hosts", el aviso de Ajustes te recuerda
+marcar una lista tipo hosts (StevenBlack) si no hay ninguna.
+
+### Investigación previa (por qué no se empaquetó la lib nativa)
+
+Revisé 6 alternativas externas del chat de DeepSeek:
+- **AdblockAndroid (Edsuns)** — basada en Brave, vía JitPack. Descartada:
+  abandonada desde 2021, licencia LGPL-2.1 (copyleft fuerte), tag `1.0`
+  único sin mantenimiento.
+- **Adblock Plus AdblockWebView** — la oficial. Descartada: jcenter
+  retirado, sin mirror.
+- **DevSurf / EinkBro** — navegadores con motor embebido, no publican
+  AAR. Extraerlas a mano son días de trabajo sin mantenimiento futuro.
+- **Brave ad-block (C++ puro)** — requeriría JNI + NDK, semanas de
+  integración, +5–8 MB.
+- **marcelbohland/Android-Webview-Adblock** — ejemplo didáctico, sin
+  cosméticos.
+
+Conclusión: FilterEngine ya cubre el 90% del bloqueo real (red +
+cosméticos simples) sin pesar nada. Las librerías externas están
+muertas, no publicadas o requieren empaquetar 30 MB nativos. La opción
+sana es quedarse con lo que funciona y dejar al usuario elegir entre
+completo y mínimo.
+
+### Notas técnicas
+
+- `AdBlockEngine.java` ahora tiene `selectedEngine(ctx)` /
+  `setEngine(ctx, id)` / `engineName(ctx)` para el selector.
+- `init()` y `updateLists()` filtran las listas según el modo: en
+  "hosts" se saltan las EasyList (no se descargan, no se cargan en
+  RAM). En "kotlin" se cargan todas las seleccionadas.
+- El self-test de arranque sigue igual: valida que el motor bloquea
+  un script de anuncio y deja pasar un CSS normal antes de marcar
+  READY. Las listas de hosts (StevenBlack) incluyen los dominios de
+  publicidad grandes, así que el test pasa en ambos modos.
+- `FilterEngine` y `HostsAdapter` no se tocaron: son los que ya
+  funcionaban. El cambio es solo en el facade y la UI.
+
+---
+
 # TurboDL 4.8 — Notas de la versión
 
 Fecha: 2026-11-22

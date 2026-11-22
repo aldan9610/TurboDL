@@ -67,6 +67,8 @@ class SettingsActivity : Activity() {
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
         row("🛡 Bloqueador de anuncios",
             if (eng.sp.getBoolean("adblock", true)) "activado" else "desactivado") { toggleAdblock() }
+        row("🧱 Motor de bloqueo",
+            com.turbodl.engine.AdBlockEngine.engineName(this)) { pickAdblockEngine() }
         row("📋 Listas de filtros",
             com.turbodl.adblock.AdblockCatalog.summary(this)) { pickAdblockLists() }
         row("🚫 Exclusiones del bloqueador", exentoText()) { exentoManage() }
@@ -141,7 +143,8 @@ class SettingsActivity : Activity() {
 
     private fun adblockText(): String = when {
         com.turbodl.engine.AdBlockEngine.ready() ->
-            "motor activo · ${com.turbodl.adblock.AdblockCatalog.summary(this)}"
+            "${com.turbodl.engine.AdBlockEngine.engineName(this)} activo · " +
+                com.turbodl.adblock.AdblockCatalog.summary(this)
         com.turbodl.engine.AdBlockEngine.caido() ->
             "motor no disponible: lista básica de hosts"
         else -> "cargando motor…"
@@ -710,6 +713,41 @@ class SettingsActivity : Activity() {
         val nv = !eng.sp.getBoolean("adblock", true)
         eng.sp.edit().putBoolean("adblock", nv).apply()
         buildUi()
+    }
+
+    /** 4.9: elige el motor de bloqueo (FilterEngine Kotlin vs Solo hosts).
+     *  Al cambiar, se persiste y se fuerza la recarga del motor en segundo
+     *  plano (si el bloqueador está activo). En modo "Solo hosts" solo se
+     *  cargan las listas Format.HOSTS del catálogo, así que avisamos si el
+     *  usuario las tiene todas desmarcadas. */
+    private fun pickAdblockEngine() {
+        val cur = com.turbodl.engine.AdBlockEngine.selectedEngine(this)
+        val opts = arrayOf(
+            "FilterEngine (Kotlin) — recomendado",
+            "Solo hosts — mínimo, sin cosméticos"
+        )
+        val idx = if (cur == "hosts") 1 else 0
+        AlertDialog.Builder(this)
+            .setTitle("Motor de bloqueo de anuncios")
+            .setSingleChoiceItems(opts, idx) { d, which ->
+                val engineId = if (which == 1) "hosts" else "kotlin"
+                d.dismiss()
+                if (engineId == "hosts") {
+                    // avisar: en modo hosts solo sirven las listas HOSTS
+                    val tieneHosts = com.turbodl.adblock.AdblockCatalog
+                        .selected(this).any {
+                            it.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS }
+                    if (!tieneHosts) {
+                        toast("Modo Solo hosts: marca una lista tipo hosts " +
+                            "(p. ej. StevenBlack) en Listas de filtros")
+                    }
+                }
+                com.turbodl.engine.AdBlockEngine.setEngine(this, engineId)
+                toast("Motor: ${com.turbodl.engine.AdBlockEngine.engineName(this)}")
+                buildUi()
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     /** 4.8: activar/desactivar el caché HTTP con ETag del navegador. */
