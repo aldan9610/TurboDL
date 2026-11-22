@@ -481,31 +481,19 @@ class BrowserActivity : Activity() {
     private lateinit var fab: Button
     private var sitesPage = 0          // sub-panel visible actualmente
     private var sitesSnapBusy = false  // 4.2.1: evita reentrancia en el snap
-    /** 4.2.3 (U9): detector de gestos del pager de accesos. Intercepta
-     *  el fling horizontal para saltar de página INMEDIATAMENTE (sin
-     *  smoothScrollTo), con umbral muy bajo. */
-    private val sitesPagerGesture: android.view.GestureDetector by lazy {
-        android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, vx: Float, vy: Float): Boolean {
-                if (Math.abs(vx) < FLING_VEL_MIN) return false
-                snapPagerInstant(sitesPager, isMenu = false, forward = vx < 0f)
-                return true
-            }
-            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean = false
-        })
-    }
-    /** 4.2.3 (U9): detector de gestos del pager del menú. Igual que el de
-     *  accesos pero para el menú inferior. */
-    private val menuPagerGesture: android.view.GestureDetector by lazy {
-        android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(e1: android.view.MotionEvent?, e2: android.view.MotionEvent, vx: Float, vy: Float): Boolean {
-                if (Math.abs(vx) < FLING_VEL_MIN) return false
-                snapPagerInstant(menuPager, isMenu = true, forward = vx < 0f)
-                return true
-            }
-            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean = false
-        })
-    }
+    /** 4.3 (U9, redefinido): el `GestureDetector` de la 4.2.3 consumía
+     *  ACTION_DOWN y BLOQUEABA los clics en las celdas del menú y en los
+     *  accesos directos (el usuario no podía abrir Notas ni ningún
+     *  botón del menú). Se sustituye por un `VelocityTracker` manual:
+     *  el touch listener devuelve siempre `false` (no consume), así
+     *  que el HorizontalScrollView y sus hijos reciben todos los
+     *  eventos y los clics funcionan. Solo medimos la velocidad en
+     *  ACTION_UP; si supera FLING_VEL_MIN, saltamos de página de
+     *  inmediato con scrollTo(). Mantiene el swipe inmediato y muy
+     *  sensible SIN romper los clics. */
+    private var sitesTracker: android.view.VelocityTracker? = null
+    /** Igual que sitesTracker, pero para el pager del menú inferior. */
+    private var menuTracker: android.view.VelocityTracker? = null
     private var editSites = false
     /** Sub-paneles activos: cada entrada dice a qué categoría (0..2) pertenece
      *  y qué "página" dentro de esa categoría es (0-based). Lo construye
@@ -810,36 +798,51 @@ class BrowserActivity : Activity() {
                 updateSitesTitle()
             }
         }
-        // 4.2.3 (U9, redefinido): swipe MUY sensible e inmediato.
-        // Se sustituye el esquema anterior (runnable que espera 100ms de
-        // scroll estable + smoothScrollTo) por detección de fling con
-        // GestureDetector + scrollTo instantáneo. Lo que pidió el usuario:
-        // "que sea muy sensible el movimiento de swipe … con un pequeño
-        // gesto rápidamente se cambie de ventanas … la transición sea
-        // bien rápida/dura y pase de manera inmediata".
-        //   · onFling (GestureDetector): si la velocidad horizontal supera
-        //     FLING_VEL_MIN, salta a la página siguiente/anterior
-        //     INMEDIATAMENTE (sin animación) y consume el evento para que
-        //     el ScrollView no haga su propio fling.
-        //   · onUp (ACTION_UP): si NO hubo fling (arrastre lento), el
-        //     ScrollView ya movió el contenido; al soltar, encaja a la
-        //     página según el umbral del 10%. scrollTo instantáneo.
-        sitesPager.setOnTouchListener { v, ev ->
-            // Primero dejamos que el GestureDetector evalúe el fling.
-            val handled = sitesPagerGesture.onTouchEvent(ev)
-            // Al soltar el dedo: si NO hubo fling (snapBusy sigue false),
-            // encajar según el desplazamiento. Si hubo fling, snapPagerInstant
-            // ya puso snapBusy=true y saltó la página, así que ignoramos
-            // este encaje (el scrollX es el previo y nos llevaría a la
-            // página equivocada).
-            if ((ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
-                 ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) && !sitesSnapBusy) {
-                scheduleSitesSnap()
+        // 4.3 (U9, redefinido): swipe MUY sensible e inmediato SIN romper
+        // los clics. La 4.2.3 usaba un GestureDetector que consumía
+        // ACTION_DOWN y bloqueaba los clics en las celdas del menú y en
+        // los accesos directos (el usuario no podía abrir Notas ni
+        // ningún botón del menú). Ahora usamos un VelocityTracker
+        // manual: el touch listener devuelve SIEMPRE false (no
+        // consume), de modo que el HorizontalScrollView y sus hijos
+        // reciben todos los eventos y los clics funcionan. Solo
+        // medimos la velocidad en ACTION_UP; si supera FLING_VEL_MIN,
+        // saltamos de página de inmediato con scrollTo(). Mantiene el
+        // swipe inmediato y muy sensible del 4.2.3 sin el bug.
+        sitesPager.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    sitesTracker?.clear()
+                    sitesTracker = android.view.VelocityTracker.obtain()
+                    sitesTracker?.addMovement(ev)
+                }
+                android.view.MotionEvent.ACTION_MOVE -> sitesTracker?.addMovement(ev)
+                android.view.MotionEvent.ACTION_UP -> {
+                    sitesTracker?.addMovement(ev)
+                    sitesTracker?.computeCurrentVelocity(1000)
+                    val vx = sitesTracker?.xVelocity ?: 0f
+                    sitesTracker?.recycle()
+                    sitesTracker = null
+                    if (Math.abs(vx) >= FLING_VEL_MIN) {
+                        // Fling: saltar de página INMEDIATAMENTE. No
+                        // llamamos a scheduleSitesSnap (snapBusy queda
+                        // true y bloquea el encaje que haría el snap por
+                        // desplazamiento, que usaría el scrollX previo).
+                        snapPagerInstant(sitesPager, isMenu = false, forward = vx < 0f)
+                    } else {
+                        // Arrastre lento: encajar según el umbral del 10%.
+                        if (!sitesSnapBusy) scheduleSitesSnap()
+                    }
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    sitesTracker?.recycle()
+                    sitesTracker = null
+                }
             }
-            // Si el detector consumió el evento (hubo fling), no
-            // propagamos al ScrollView para que no ruede por inercia.
-            v.parent?.requestDisallowInterceptTouchEvent(handled)
-            handled
+            // NUNCA consumir: devolvemos false para que el ScrollView
+            // y sus hijos (accesos directos) reciban el toque y el
+            // clic funcione. El fling lo disparamos en ACTION_UP.
+            false
         }
         // 4.2.1: pulsación larga sobre el título del panel → renombrar la
         // categoría activa. (También accesible desde el menú contextual de
@@ -860,15 +863,36 @@ class BrowserActivity : Activity() {
                 renderMenuDots()
             }
         }
-        // 4.2.3 (U9, redefinido): mismo swipe inmediato en el menú.
-        menuPager.setOnTouchListener { v, ev ->
-            val handled = menuPagerGesture.onTouchEvent(ev)
-            if ((ev.actionMasked == android.view.MotionEvent.ACTION_UP ||
-                 ev.actionMasked == android.view.MotionEvent.ACTION_CANCEL) && !menuSnapBusy) {
-                scheduleMenuSnap()
+        // 4.3 (U9, redefinido): mismo swipe inmediato en el menú, con
+        // VelocityTracker (no GestureDetector) para que los clics en las
+        // celdas del menú (Notas, Marcadores, Ajustes…) funcionen.
+        menuPager.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    menuTracker?.clear()
+                    menuTracker = android.view.VelocityTracker.obtain()
+                    menuTracker?.addMovement(ev)
+                }
+                android.view.MotionEvent.ACTION_MOVE -> menuTracker?.addMovement(ev)
+                android.view.MotionEvent.ACTION_UP -> {
+                    menuTracker?.addMovement(ev)
+                    menuTracker?.computeCurrentVelocity(1000)
+                    val vx = menuTracker?.xVelocity ?: 0f
+                    menuTracker?.recycle()
+                    menuTracker = null
+                    if (Math.abs(vx) >= FLING_VEL_MIN) {
+                        snapPagerInstant(menuPager, isMenu = true, forward = vx < 0f)
+                    } else {
+                        if (!menuSnapBusy) scheduleMenuSnap()
+                    }
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    menuTracker?.recycle()
+                    menuTracker = null
+                }
             }
-            v.parent?.requestDisallowInterceptTouchEvent(handled)
-            handled
+            // NUNCA consumir: que las celdas del menú reciban el clic.
+            false
         }
 
         readerMode = eng.sp.getBoolean("readerMode", false)
@@ -4327,176 +4351,228 @@ class BrowserActivity : Activity() {
 
     // ---------------- notas (F5) ----------------
 
-    /** Notas con CRUD completo (4.0): prompts y textos que se copian a los
-     *  chatbots; copiar al portapapeles con un toque desde el navegador.
-     *  4.2: arregla los problemas reportados por el usuario —
-     *   · La lista NO se refrescaba tras crear/editar una nota (solo tras
-     *     eliminar), así que el usuario creaba una nota y no la veía. Ahora
-     *     el editor recarga la lista al cerrarse y se reabre la vista.
-     *   · La búsqueda existía en la BD (NotesDb.notes(query)) pero no se
-     *     exponía en la UI. Ahora hay una caja de búsqueda en la cabecera
-     *     que filtra por título o cuerpo en tiempo real.
-     *   · editNote usaba ndb.notes().firstOrNull { id==... } (leía toda la
-     *     tabla); ahora usa ndb.getNote(id).
-     *   · Eliminar pide confirmación.
+    /** Notas con CRUD funcional (4.3): la 4.2 tenía el CRUD completo en
+     *  la BD pero el usuario no podía abrir Notas porque el GestureDetector
+     *  del swipe del menú bloqueaba los clics en las celdas. Arreglado eso
+     *  (ver menuPager VelocityTracker), se reescribe la UI de notas para
+     *  que sea clara y usable:
+     *   · Tarjetas verticales (ScrollView) en vez de ListView anidado.
+     *   · Cada tarjeta muestra título, vista previa del cuerpo y fecha, y
+     *     botones inline visibles: ✏ Editar, 📋 Copiar, ↗ Compartir, 🗑 Borrar.
+     *     Nada de menú contextual oculto que el usuario no encuentre.
+     *   · Caja de búsqueda en la cabecera que filtra por título/cuerpo.
+     *   · Botón ＋ Nueva nota visible en la cabecera.
+     *   · Tras crear/editar/borrar, la lista se refresca íntegramente.
+     *   · Borrar pide confirmación.
      */
     private fun showNotes(initialQuery: String = "") {
         val ndb = com.turbodl.db.NotesDb.get(this)
-        val rows = ndb.notes(initialQuery)
-        val lay = LinearLayout(this)
-        lay.orientation = LinearLayout.VERTICAL
-        // 4.2: caja de búsqueda
+        val rows = ArrayList<com.turbodl.db.NotesDb.Note>()
+        rows.addAll(ndb.notes(initialQuery))
+
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setPadding(dp(12), dp(12), dp(12), dp(12))
+
+        // --- cabecera: caja de búsqueda + botón nueva nota ---
+        val header = LinearLayout(this)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
         val searchBox = android.widget.EditText(this)
         searchBox.hint = "🔍 Buscar en notas…"
         searchBox.setText(initialQuery)
         searchBox.setSingleLine(true)
-        searchBox.setPadding(40, 24, 40, 24)
-        lay.addView(searchBox, LinearLayout.LayoutParams(
+        val searchLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
+        searchLp.weight = 1f
+        searchBox.layoutParams = searchLp
+        searchBox.setPadding(dp(8), dp(8), dp(8), dp(8))
+        val btnNew = Button(this)
+        btnNew.text = "＋ Nueva"
+        btnNew.setPadding(dp(12), dp(8), dp(12), dp(8))
+        header.addView(searchBox)
+        header.addView(btnNew)
+        root.addView(header, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT))
-        val lv = ListView(this)
-        val ad = object : BaseAdapter() {
-            override fun getCount(): Int = rows.size
-            override fun getItem(p: Int): com.turbodl.db.NotesDb.Note = rows[p]
-            override fun getItemId(p: Int): Long = rows[p].id
-            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View {
-                val v = TextView(this@BrowserActivity)
-                val n = getItem(p)
-                v.setPadding(40, 26, 40, 26)
-                v.textSize = 13f
-                v.text = n.preview() + "\n" +
-                    java.text.DateFormat.getDateTimeInstance(
-                        java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
-                        .format(java.util.Date(n.time))
-                v.background = getDrawable(android.R.drawable.list_selector_background)
-                return v
-            }
-        }
-        lv.adapter = ad
-        lay.addView(lv, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 620))
-        if (rows.isEmpty()) {
-            val empty = TextView(this)
-            empty.text = if (initialQuery.isBlank())
-                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
-            else "Ninguna nota coincide con «$initialQuery»."
-            empty.setPadding(40, 30, 40, 30)
-            lay.addView(empty, 1)
-        }
+
+        // --- contenedor de tarjetas (ScrollView) ---
+        val scroll = android.widget.ScrollView(this)
+        val cards = LinearLayout(this)
+        cards.orientation = LinearLayout.VERTICAL
+        scroll.addView(cards, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(scroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0).apply { weight = 1f })
+
         val dlg = AlertDialog.Builder(this)
-            .setTitle("🗒 Notas (${rows.size})")
-            .setView(lay)
+            .setTitle("🗒 Notas")
+            .setView(root)
             .setNegativeButton("Cerrar", null)
             .create()
-        val btnNew = Button(this)
-        btnNew.text = "＋ Nueva nota"
-        lay.addView(btnNew)
-        btnNew.setOnClickListener { dlg.dismiss(); editNote(-1L) { showNotes(searchBox.text.toString()) } }
-        // 4.2: filtrado en vivo por título/cuerpo
+
+        // Refresca íntegramente las tarjetas a partir de `rows`.
+        fun rebuildCards() {
+            cards.removeAllViews()
+            dlg.setTitle("🗒 Notas (${rows.size})")
+            if (rows.isEmpty()) {
+                val empty = TextView(this)
+                empty.text = if (searchBox.text.isBlank())
+                    "Sin notas todavía. Pulsa ＋ Nueva para crear una."
+                else "Ninguna nota coincide con «${searchBox.text}»."
+                empty.setPadding(dp(4), dp(16), dp(4), dp(16))
+                cards.addView(empty)
+                return
+            }
+            for (n in rows) {
+                val card = LinearLayout(this)
+                card.orientation = LinearLayout.VERTICAL
+                card.setPadding(dp(12), dp(10), dp(12), dp(10))
+                val bg = android.graphics.drawable.GradientDrawable()
+                bg.setColor(0xFFEFEFEF.toInt())
+                bg.cornerRadius = 8f
+                bg.setStroke(1, 0xFFCCCCCC.toInt())
+                card.background = bg
+                // Título (negrita) + fecha.
+                val titleRow = LinearLayout(this)
+                titleRow.orientation = LinearLayout.HORIZONTAL
+                titleRow.gravity = Gravity.CENTER_VERTICAL
+                val titleTv = TextView(this)
+                titleTv.text = n.title.ifEmpty { "(sin título)" }
+                titleTv.setTypeface(titleTv.typeface, android.graphics.Typeface.BOLD)
+                titleTv.textSize = 15f
+                val tlp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
+                tlp.weight = 1f
+                titleTv.layoutParams = tlp
+                val dateTv = TextView(this)
+                dateTv.text = java.text.DateFormat.getDateTimeInstance(
+                    java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                    .format(java.util.Date(n.time))
+                dateTv.textSize = 11f
+                dateTv.setTextColor(0xFF888888.toInt())
+                titleRow.addView(titleTv)
+                titleRow.addView(dateTv)
+                card.addView(titleRow)
+                // Vista previa del cuerpo.
+                val bodyTv = TextView(this)
+                bodyTv.text = n.body.replace('\n', ' ').take(120)
+                bodyTv.textSize = 13f
+                bodyTv.setTextColor(0xFF444444.toInt())
+                bodyTv.setPadding(0, dp(4), 0, dp(8))
+                card.addView(bodyTv)
+                // Fila de botones inline.
+                val btnRow = LinearLayout(this)
+                btnRow.orientation = LinearLayout.HORIZONTAL
+                fun mkBtn(label: String, color: Int, fn: () -> Unit) {
+                    val b = Button(this)
+                    b.text = label
+                    b.textSize = 12f
+                    b.setTextColor(color)
+                    b.setPadding(dp(14), dp(6), dp(14), dp(6))
+                    b.minWidth = 0
+                    b.minimumWidth = 0
+                    b.setOnClickListener { fn() }
+                    btnRow.addView(b)
+                }
+                mkBtn("✏ Editar", 0xFF1B5E20.toInt()) {
+                    dlg.dismiss()
+                    editNote(n.id) { showNotes(searchBox.text.toString()) }
+                }
+                mkBtn("📋 Copiar", 0xFF0D47A1.toInt()) {
+                    clipboard(n.body)
+                    toast("Copiado: pégalo donde quieras")
+                }
+                mkBtn("↗ Compartir", 0xFF4A148C.toInt()) {
+                    try {
+                        val i = android.content.Intent(android.content.Intent.ACTION_SEND)
+                            .setType("text/plain")
+                            .putExtra(android.content.Intent.EXTRA_TEXT, n.body)
+                        startActivity(android.content.Intent.createChooser(i, "Compartir nota"))
+                    } catch (e: Exception) { }
+                }
+                mkBtn("🗑 Borrar", 0xFFB71C1C.toInt()) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Eliminar nota")
+                        .setMessage("¿Borrar «${n.title.ifEmpty { "(sin título)" }}»?")
+                        .setPositiveButton("Eliminar") { _, _ ->
+                            ndb.deleteNote(n.id)
+                            rows.remove(n)
+                            rebuildCards()
+                            toast("Nota eliminada")
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                }
+                card.addView(btnRow)
+                val clp = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT)
+                clp.bottomMargin = dp(8)
+                card.layoutParams = clp
+                cards.addView(card)
+            }
+        }
+        rebuildCards()
+
+        btnNew.setOnClickListener {
+            dlg.dismiss()
+            editNote(-1L) { showNotes(searchBox.text.toString()) }
+        }
+        // Filtrado en vivo por título/cuerpo.
         searchBox.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
             override fun afterTextChanged(s: android.text.Editable?) {
                 val q = s?.toString() ?: ""
-                // mantener la vista del diálogo pero reconsultar la BD
                 rows.clear()
                 rows.addAll(ndb.notes(q))
-                // actualizar el título y el placeholder
-                dlg.setTitle("🗒 Notas (${rows.size})")
-                ad.notifyDataSetChanged()
-                // mostrar/ocultar mensaje de vacío según corresponda
-                val emptyView = if (lay.childCount >= 2) lay.getChildAt(1) as? TextView else null
-                if (rows.isEmpty()) {
-                    if (emptyView == null || emptyView.text?.startsWith("Sin notas") == true ||
-                        emptyView.text?.startsWith("Ninguna nota") == true) {
-                        if (emptyView == null) {
-                            val e = TextView(this@BrowserActivity)
-                            e.setPadding(40, 30, 40, 30)
-                            e.text = if (q.isBlank())
-                                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
-                            else "Ninguna nota coincide con «$q»."
-                            lay.addView(e, 1)
-                        } else {
-                            emptyView.text = if (q.isBlank())
-                                "Sin notas todavía. Crea una y cópiala al portapapeles con un toque."
-                            else "Ninguna nota coincide con «$q»."
-                        }
-                    }
-                } else {
-                    if (emptyView != null && (emptyView.text?.startsWith("Sin notas") == true ||
-                            emptyView.text?.startsWith("Ninguna nota") == true)) {
-                        lay.removeView(emptyView)
-                    }
-                }
+                rebuildCards()
             }
         })
-        lv.setOnItemClickListener { _, _, p, _ ->
-            val n = rows[p]
-            val acts = arrayOf("✏ Editar", "📋 Copiar al portapapeles", "↗ Compartir", "🗑 Eliminar")
-            AlertDialog.Builder(this)
-                .setTitle(n.title.ifEmpty { "(sin título)" })
-                .setItems(acts) { _, w ->
-                    when (w) {
-                        0 -> { dlg.dismiss(); editNote(n.id) { showNotes(searchBox.text.toString()) } }
-                        1 -> { clipboard(n.body); toast("Copiado: pégalo donde quieras") }
-                        2 -> try {
-                            val i = android.content.Intent(android.content.Intent.ACTION_SEND)
-                                .setType("text/plain")
-                                .putExtra(android.content.Intent.EXTRA_TEXT, n.body)
-                            startActivity(android.content.Intent.createChooser(i, "Compartir nota"))
-                        } catch (e: Exception) { }
-                        3 -> {
-                            // 4.2: pedir confirmación antes de borrar
-                            AlertDialog.Builder(this)
-                                .setTitle("Eliminar nota")
-                                .setMessage("¿Borrar «${n.title.ifEmpty { "(sin título)" }}»?")
-                                .setPositiveButton("Eliminar") { _, _ ->
-                                    ndb.deleteNote(n.id)
-                                    rows.removeAt(p)
-                                    ad.notifyDataSetChanged()
-                                    dlg.setTitle("🗒 Notas (${rows.size})")
-                                    toast("Nota eliminada")
-                                }
-                                .setNegativeButton("Cancelar", null)
-                                .show()
-                        }
-                    }
-                }
-                .setNegativeButton("Cancelar", null)
-                .show()
-        }
         dlg.show()
     }
 
     /**
      * Editor de nota: creación y edición (misma ventana).
-     * 4.2: añadido callback `onSaved` para que la vista de lista se
-     * refresque al cerrar el editor (antes la lista NO se refrescaba
-     * tras crear/editar — el usuario creaba una nota y no la veía).
-     * Usa ndb.getNote(id) en vez de releer toda la tabla.
+     * 4.3: campos con padding cómodo, botón de copiar, callback onSaved
+     * para refrescar la lista al cerrar.
      */
     private fun editNote(id: Long, onSaved: () -> Unit = {}) {
         val ndb = com.turbodl.db.NotesDb.get(this)
         val existing = if (id > 0) ndb.getNote(id) else null
         val lay = LinearLayout(this)
         lay.orientation = LinearLayout.VERTICAL
-        lay.setPadding(50, 30, 50, 0)
+        lay.setPadding(dp(16), dp(12), dp(16), dp(4))
         val et = android.widget.EditText(this)
-        et.hint = "Título"
+        et.hint = "Título (opcional)"
         et.setText(existing?.title ?: "")
+        et.setSingleLine(true)
+        et.textSize = 16f
+        lay.addView(et, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
         val eb = android.widget.EditText(this)
-        eb.hint = "Escribe aquí (prompt, texto…)"
-        eb.setMinLines(6)
+        eb.hint = "Escribe aquí el texto…"
+        eb.setMinLines(8)
         eb.gravity = Gravity.TOP
         eb.setText(existing?.body ?: "")
-        lay.addView(et); lay.addView(eb)
+        eb.textSize = 15f
+        val elp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        elp.topMargin = dp(8)
+        eb.layoutParams = elp
+        lay.addView(eb)
         AlertDialog.Builder(this)
             .setTitle(if (existing == null) "Nueva nota" else "Editar nota")
             .setView(lay)
             .setPositiveButton("Guardar") { _, _ ->
                 val t = et.text.toString().trim()
                 val b = eb.text.toString()
-                if (b.isBlank() && t.isBlank()) return@setPositiveButton
+                if (b.isBlank() && t.isBlank()) {
+                    toast("La nota está vacía")
+                    return@setPositiveButton
+                }
                 if (existing == null)
                     ndb.addNote(t, b, tabs.getOrNull(cur)?.url ?: "")
                 else ndb.updateNote(existing.id, t, b)

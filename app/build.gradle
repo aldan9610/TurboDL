@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 21
-        versionName "4.2.5"
+        versionCode 22
+        versionName "4.3"
     }
 
     signingConfigs {
@@ -67,6 +67,15 @@ android {
         abortOnError false
         checkReleaseBuilds false
     }
+    // 4.3: Robolectric necesita que los tests unitarios tengan acceso
+    // a los recursos/manifest de Android y se ejecuten con el runner
+    // de AndroidX.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
 
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
@@ -111,4 +120,9 @@ dependencies {
     // implementation 'org.adblockplus:adblock-android-webview:4.5.0'
     // JUnit solo para los tests JVM del motor de bloqueo (no entra en el APK)
     testImplementation 'junit:junit:4.13.2'
+    // 4.3: Robolectric para tests JVM que tocan SQLite (NotesDb) sin
+    // dispositivo físico. Sólo testImplementation: no entra en el APK.
+    testImplementation 'org.robolectric:robolectric:4.13'
+    testImplementation 'androidx.test:core:1.6.1'
+    testImplementation 'androidx.test.ext:junit:1.2.1'
 }

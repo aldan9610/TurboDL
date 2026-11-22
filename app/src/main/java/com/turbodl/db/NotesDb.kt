@@ -54,6 +54,13 @@ class NotesDb private constructor(ctx: Context) :
         writableDatabase.delete("notes", "id=?", arrayOf(id.toString()))
     }
 
+    /** 4.3: borra todas las notas. Se usa en los tests JVM de CRUD para
+     *  garantizar aislamiento entre tests (NotesDb es singleton, así no
+     *  se puede recrear la instancia). No se llama desde la app. */
+    @Synchronized fun clearAllNotes() {
+        writableDatabase.execSQL("DELETE FROM notes")
+    }
+
     /** Lee una sola nota por id (4.2: antes editNote releía toda la
      *  lista con notes().firstOrNull; ahora va directo a la fila). */
     @Synchronized fun getNote(id: Long): Note? {

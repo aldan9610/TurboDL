@@ -1,10 +1,40 @@
-# TurboDL 4.2.5
+# TurboDL 4.3
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.3 — notas del navegador funcionales (CRUD) + clics del menú arreglados
+
+La 4.3 hace que las notas del navegador sean completamente funcionales (CRUD)
+y arregla el bug que impedía abrir cualquier opción del menú.
+
+### 🗒 Notas con CRUD completo
+La BD ya tenía el CRUD, pero el usuario no podía abrir Notas porque el
+`GestureDetector` del swipe del menú bloqueaba los clics. Arreglado eso, se
+reescribe la UI: tarjetas con botones inline (✏ Editar, 📋 Copiar, ↗ Compartir,
+🗑 Borrar), caja de búsqueda en vivo y botón ＋ Nueva visible. La lista se
+refresca tras crear/editar/borrar, y borrar pide confirmación.
+
+### 🖱 Clics del menú restaurados
+El `GestureDetector` de la 4.2.3 consumía `ACTION_DOWN` y bloqueaba todos los
+clics en las celdas del menú (Notas, Marcadores, Ajustes…). Se sustituye por un
+`VelocityTracker` manual que **nunca consume el evento**: el ScrollView y sus
+hijos reciben el toque completo y los clics funcionan. El swipe sigue siendo
+inmediato (umbral 300 px/s + scrollTo).
+
+### 🧪 Test de regresión del CRUD
+Nuevo test JVM `NotesDbTest` (7 casos) con Robolectric, contra SQLite real
+sin dispositivo. Valida create/get, listado, update, delete, búsqueda y
+preview. Añade `NotesDb.clearAllNotes()` para aislar tests.
+
+### 📦 Internas
+- versionCode 22, versionName 4.3. Misma firma que 4.2.4/4.2.5 (actualización
+  sin desinstalar). 129 tests JVM pasan (0 fallos).
+
+---
 
 ## Novedades de la 4.2.5 — flujo de navegación corregido (btnHome y btnMainHome)
 

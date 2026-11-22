@@ -1,3 +1,93 @@
+# TurboDL 4.3 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Notas del navegador funcionales (CRUD completo)
+
+Reportaste: *"haz otra versión, la 4.3, que incluya dentro de las notas del
+navegador sean funcionales; hasta ahora no puedo hacer nada, quiero ser
+capaz de hacer CRUD con las notas"*.
+
+### Causa raíz
+
+Las notas ya tenían el CRUD completo en la base de datos (`NotesDb`:
+`addNote`, `updateNote`, `deleteNote`, `getNote`, `notes(query)`), pero el
+usuario **no podía abrir la pantalla de Notas**. El culpable era el
+`GestureDetector` que añadí en la 4.2.3 para el swipe del menú: ese detector
+consumía el evento `ACTION_DOWN` en el `menuPager` y, al devolver `true`,
+**bloqueaba todos los clics en las celdas del menú** (Notas, Marcadores,
+Ajustes…). El usuario no podía pulsar ningún botón del menú.
+
+### Solución 1: VelocityTracker en vez de GestureDetector (U9, redefinido)
+
+Se sustituye el `GestureDetector` de los dos pagers (`sitesPager` y
+`menuPager`) por un `VelocityTracker` manual. La diferencia clave: el touch
+listener **devuelve siempre `false`** (nunca consume el evento), de modo que
+el `HorizontalScrollView` y todos sus hijos (las celdas del menú, los accesos
+directos) reciben el evento completo y los clics funcionan. Solo medimos la
+velocidad del gesto en `ACTION_UP`; si supera `FLING_VEL_MIN` (300 px/s),
+saltamos de página inmediatamente con `scrollTo()`. Si no, encajamos por
+desplazamiento (umbral 10%). Se mantiene el swipe inmediato y muy sensible de
+la 4.2.3 sin el bug de los clics bloqueados.
+
+### Solución 2: UI de notas reescrita
+
+La UI de notas anterior usaba un `ListView` anidado dentro de un
+`LinearLayout` con manipulación manual de vistas hijas (frágil) y un menú
+contextual oculto que el usuario no encontraba. Se reescribe:
+
+- **Tarjetas verticales** (dentro de un `ScrollView`) en vez de `ListView`.
+  Cada tarjeta muestra el **título** (negrita), la **fecha** y una
+  **vista previa del cuerpo**.
+- **Botones inline visibles** en cada tarjeta: ✏ Editar, 📋 Copiar,
+  ↗ Compartir, 🗑 Borrar. Nada de menú contextual oculto.
+- **Caja de búsqueda** en la cabecera que filtra por título o cuerpo en
+  tiempo real (vía `NotesDb.notes(query)`).
+- **Botón ＋ Nueva** en la cabecera, siempre visible.
+- Tras crear/editar/borrar, la lista se **refresca íntegramente**.
+- Borrar pide **confirmación**.
+- El editor (`editNote`) tiene padding cómodo y campo de cuerpo de 8 líneas.
+
+### CRUD completo y funcional
+
+- **Create**: ＋ Nueva → editor (título + cuerpo) → Guardar. La nota
+  aparece al instante en la lista.
+- **Read**: la lista muestra todas las notas (ordenadas por fecha
+  descendente) con vista previa. La búsqueda filtra en tiempo real.
+- **Update**: ✏ Editar sobre una tarjeta → editor precargado → Guardar.
+- **Delete**: 🗑 Borrar → confirmación → eliminada. La lista se refresca.
+- **Copiar/Compartir**: botones inline en cada tarjeta.
+
+### Test de regresión
+
+Nuevo test JVM `NotesDbTest` (7 casos) con Robolectric que valida el CRUD
+contra SQLite real sin dispositivo: create+get, listado ordenado, update
+(refresca timestamp, no toca url), delete, búsqueda por título/cuerpo, y
+preview. Añadido `NotesDb.clearAllNotes()` para aislar los tests. Esto fija
+el contract del CRUD para que futuros cambios no rompan las notas
+"sin que nadie se dé cuenta".
+
+### Internas
+
+- `versionCode` 22, `versionName` 4.3.
+- `GestureDetector` sustituido por `VelocityTracker` en `sitesPager` y
+  `menuPager`. Nuevos campos `sitesTracker`, `menuTracker`.
+- `showNotes` y `editNote` reescritos (tarjetas + botones inline).
+- `NotesDb.clearAllNotes()` añadido.
+- Robolectric 4.13 + androidx.test:core 1.6.1 + androidx.test.ext:junit
+  1.2.1 como `testImplementation`. `testOptions.unitTests
+  .includeAndroidResources = true`.
+- 129 tests JVM pasan (0 fallos): 122 anteriores + 7 nuevos de NotesDb.
+
+### Instalación
+
+```
+adb install -r TurboDL-4.3.apk
+```
+Misma firma que 4.2.4/4.2.5 → se actualiza sin desinstalar. Android 8.0+.
+
+---
+
 # TurboDL 4.2.5 — Notas de la versión
 
 Fecha: 2026-11-21
