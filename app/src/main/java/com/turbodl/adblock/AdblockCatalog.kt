@@ -100,6 +100,12 @@ object AdblockCatalog {
             Format.EASYLIST,
             "Reglas regionales para sitios en español.",
             150_000),
+        Entry("antiadblock", "Adblock Warning Removal",
+            "https://easylist-downloads.adblockplus.org/antiadblockfilters.txt",
+            Format.EASYLIST,
+            "Quita los carteles \"Desactiva tu adblock para continuar\" " +
+                "y los avisos anti-bloqueo de sitios que castigan al usuario.",
+            120_000),
         Entry("stevenblack-hosts", "StevenBlack/hosts",
             "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
             Format.HOSTS,
@@ -108,8 +114,12 @@ object AdblockCatalog {
             4_500_000)
     )
 
-    /** Set activo por defecto (instalación nueva y/o sin preferencia). */
-    val DEFAULT_IDS: Set<String> = setOf("easylist", "easyprivacy")
+    /** Set activo por defecto (instalación nueva y/o sin preferencia).
+     *  4.10: se añade `adguard-annoyances` (popups, banners de cookies,
+     *  widgets intrusivos) y `antiadblock` (quita carteles anti-adblock)
+     *  porque los popups de imágenes molestos venían sobre todo de ahí. */
+    val DEFAULT_IDS: Set<String> = setOf(
+        "easylist", "easyprivacy", "adguard-annoyances", "antiadblock")
 
     /** Mapa id -> Entry para lookup rápido. */
     val BY_ID: Map<String, Entry> = ALL.associateBy { it.id }

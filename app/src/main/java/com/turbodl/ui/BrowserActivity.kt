@@ -442,6 +442,43 @@ class BrowserActivity : Activity() {
           setTimeout(function(){
             try { document.querySelectorAll('video,audio,source').forEach(scan); } catch(e){}
           }, 4000);
+          // 4.10: popup blocker. window.open de sitios de anuncios es la
+          // fuente #1 de los popups de imágenes molestos. Interceptamos
+          // la llamada, dejamos pasar las abiertas con gesto real del
+          // usuario (clic verdadero) y bloqueamos las que se disparan
+          // sin gesto (popunders automáticos) o hacia hosts que el
+          // motor de bloqueo ya marca como popup. Si el bridge no está
+          // (página sin-sniffer), aplicamos solo la heurística de gesto.
+          try {
+            var WO = window.open;
+            var lastGesture = 0;
+            try {
+              ['click','mousedown','touchstart','keydown','pointerdown'].forEach(function(ev){
+                document.addEventListener(ev, function(){ lastGesture = Date.now(); }, true);
+              });
+            } catch(e){}
+            function isAdHost(u){
+              try {
+                if (window.__tdlBridge && window.__tdlBridge.shouldBlockPopup) {
+                  return !!window.__tdlBridge.shouldBlockPopup(location.href, u);
+                }
+              } catch(e){}
+              return false;
+            }
+            window.open = function(u, name, feat){
+              try {
+                if (u == null || u === '') return WO.apply(this, arguments); // about:blank legit
+                var full = new URL(u, location.href).href;
+                var recent = (Date.now() - lastGesture) < 1500;
+                if (isAdHost(full) || !recent) {
+                  // popup de anuncio o automático: devolver null bloquea
+                  // la apertura sin romper el script que lo llamó.
+                  return null;
+                }
+              } catch(e){}
+              return WO.apply(this, arguments);
+            };
+          } catch(e){}
         })();
         """.trimIndent()
     }
@@ -529,6 +566,19 @@ class BrowserActivity : Activity() {
         @JavascriptInterface
         fun logConsole(level: String, msg: String) {
             com.turbodl.util.DevLog.logCon(level.ifEmpty { "log" }, msg)
+        }
+
+        /** 4.10: consulta al motor de bloqueo si una URL destino de
+         *  window.open debe bloquearse como popup. Devuelve "1"/"0"
+         *  (String porque @JavascriptInterface no acepta Boolean de
+         *  vuelta de forma fiable en todas las versiones de WebView).
+         *  Corre en el hilo de WebKit: el motor es thread-safe. */
+        @JavascriptInterface
+        fun shouldBlockPopup(pageUrl: String, reqUrl: String): String {
+            return try {
+                if (com.turbodl.engine.AdBlockEngine.activado(this@BrowserActivity) &&
+                    com.turbodl.engine.AdBlockEngine.shouldBlock(pageUrl, reqUrl, "popup")) "1" else "0"
+            } catch (e: Exception) { "0" }
         }
     }
 
@@ -3217,8 +3267,34 @@ class BrowserActivity : Activity() {
                 try { tmp.destroy() } catch (e: Exception) { }
                 pendingTempWebViews.remove(tmp)
                 if (isFinishing || isDestroyed) return@postDelayed
-                if (!u.isNullOrEmpty()) newTab(u, true)
-                else if (!isFinishing) toast("El enlace no se pudo abrir en nueva pestaña")
+                if (!u.isNullOrEmpty()) {
+                    // 4.10: filtrar el popup contra el adblock ANTES de
+                    // abrir la nueva pestaña. Las reglas $popup de EasyList
+                    // y AdGuard Annoyances marcan los hosts de los
+                    // popunders/landing de anuncios; si el motor dice
+                    // bloquear, lo descartamos como si fuera un popunder
+                    // sin gesto. Solo aplica si el bloqueador está activo
+                    // (AdBlockEngine.shouldBlock ya respeta el toggle y
+                    // las exenciones por sitio).
+                    val pageUrl = tabOf(view)?.url ?: ""
+                    val blocked = try {
+                        com.turbodl.engine.AdBlockEngine.activado(this@BrowserActivity) &&
+                            com.turbodl.engine.AdBlockEngine.shouldBlock(pageUrl, u, "popup")
+                    } catch (e: Exception) { false }
+                    if (blocked) {
+                        val t = tabOf(view)
+                        if (t != null) {
+                            bumpBlocked(t, u)
+                            synchronized(t) { t.popups++ }
+                        }
+                        if (System.currentTimeMillis() - lastPopToast > 2500) {
+                            lastPopToast = System.currentTimeMillis()
+                            toast("Ventana emergente de anuncio bloqueada")
+                        }
+                    } else {
+                        newTab(u, true)
+                    }
+                } else if (!isFinishing) toast("El enlace no se pudo abrir en nueva pestaña")
             }, 500)
             return true
         }

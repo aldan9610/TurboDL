@@ -1,3 +1,90 @@
+# TurboDL 4.10 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Bloqueo de popups de imágenes molestos
+
+Reportaste: *"Muchos sitios me generan popup de imágenes molestos que
+incluso dicen que son ads, ¿esto se puede solucionar?"*. Sí, y en gran
+parte se ataca con reglas cosméticas + de red que el motor ya soporta
+pero no cargaba por defecto. La 4.10 activa las listas anti-popup,
+filtra los `window.open` reales contra el adblock y neutraliza los
+popups automáticos con JS.
+
+### Tres tipos de popup y cómo se ataca cada uno
+
+1. **Popups cosméticos** (los más comunes): un `<div>` overlay con una
+   imagen y un botón "X" minúsculo. No abren ventana nueva, se
+   superponen. Se arreglan con reglas `##selector` de ocultamiento —
+   ya soportadas por `FilterEngine`.
+2. **Popups/Pop-unders reales (`window.open`)**: abren pestaña o
+   ventana nueva con una landing de anuncio. Se arreglan con reglas de
+   red `$popup` bloqueando el host destino **antes** de abrir.
+3. **"Notificaciones push" falsas**: en Android WebView no existe la
+   API `Notification` web, así que lo que veías eran en realidad
+   popups cosméticos (#1). No hace falta un toggle de notificaciones.
+
+### Qué se cambió
+
+**1. Listas anti-popup activadas por defecto** (`AdblockCatalog.kt`)
+
+El `DEFAULT_IDS` seguía siendo `{easylist, easyprivacy}` desde la 4.2.
+AdGuard Annoyances existía en el catálogo pero no se cargaba si el
+usuario no la marcaba a mano. Ahora el default es:
+`{easylist, easyprivacy, adguard-annoyances, antiadblock}`.
+
+- **AdGuard Annoyances** — popups, banners de cookies, widgets
+  sociales intrusivos, notificaciones push falsas. La clave para tu
+  problema.
+- **Adblock Warning Removal List** (nueva entrada en el catálogo) —
+  quita los carteles "Desactiva tu adblock para continuar" que algunos
+  sitios muestran cuando detectan bloqueo.
+
+Los usuarios existentes no pierden su selección guardada; solo una
+instalación nueva (o quien no haya tocado "Listas de filtros") coge
+el nuevo default. Para sacarle provecho ya: Ajustes → Navegador →
+Listas de filtros → marca AdGuard Annoyances + Adblock Warning Removal.
+
+**2. Filtro de `window.open` en `onCreateWindow`** (`BrowserActivity.kt`)
+
+Hasta 4.9, los popups con gesto de usuario (clic) se abrían sin
+preguntar al adblock. Ahora, antes de abrir la nueva pestaña, se
+consulta `AdBlockEngine.shouldBlock(pageUrl, popupUrl, "popup")`. Si
+el motor lo marca (reglas `$popup` de EasyList/AdGuard Annoyances),
+se descarta el popup y se cuenta como bloqueado, igual que un
+popunder sin gesto.
+
+**3. Popup blocker en JS** (extensión del `HOOK` inyectado)
+
+`window.open` se intercepta desde JavaScript. La heurística es
+doble:
+- Si el host destino está en el motor de bloqueo (vía bridge
+  `shouldBlockPopup` → `AdBlockEngine.shouldBlock(..., "popup")`),
+  bloquear.
+- Si no hubo gesto real del usuario en los últimos 1,5 s
+  (popunders automáticos), bloquear.
+
+Los popups abiertos con un clic verdadero a un host NO bloqueado
+pasan. Los automáticos o hacia hosts de anuncios se devuelven `null`
+y no abren. El bridge se añadió como `@JavascriptInterface` en la
+clase `Bridge` ya existente.
+
+### Notas técnicas
+
+- `FilterEngine.kt` no se tocó: ya soportaba `$popup` (tipo bit 256)
+  desde la 3.6.0. El cambio es solo en qué listas se cargan y cómo se
+  usa el motor.
+- `onCreateWindow` ahora llama a `tabOf(view)?.url` para conocer la
+  página origen del popup y respetar las exenciones por sitio.
+- El `HOOK` se inyecta en `onPageStarted` ya existente; el bloque
+  `window.open` corre dentro del mismo IIFE que el sniffer de medios.
+- Tests del motor (`FilterEngine`, `HostsAdapter`, `AdblockCatalog`,
+  `AdBlockTypeOf`) — todos pasan.
+- APK 16,6 MB, mismo certificado que 4.9 (instalable como
+  actualización).
+
+---
+
 # TurboDL 4.9 — Notas de la versión
 
 Fecha: 2026-11-22
