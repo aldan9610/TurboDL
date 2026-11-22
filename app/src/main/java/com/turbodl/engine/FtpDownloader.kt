@@ -37,7 +37,10 @@ class FtpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                 task.name = task.fileName
             }
 
-            ctl = Socket()
+            // 4.5: si hay un proxy SOCKS activo, el socket de control se
+            // abre a través de él (FTP solo admite SOCKS, no HTTP-proxy:
+            // HTTP CONNECT no encaja con FTP de control+datos).
+            ctl = com.turbodl.util.Proxy.javaSocket(engine.ctx)
             ctl.connect(InetSocketAddress(host, port), 20000)
             reader = BufferedReader(InputStreamReader(ctl.getInputStream(), "UTF-8"))
 
@@ -80,7 +83,7 @@ class FtpDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
                 send("PASV")
                 val pr = expect(227)
                 val dp = parsePasv(pr.second)
-                val data = Socket()
+                val data = com.turbodl.util.Proxy.javaSocket(engine.ctx)
                 data.connect(InetSocketAddress(dp.first, dp.second), 20000)
                 if (ftps) {
                     val sf2 = SSLSocketFactory.getDefault() as SSLSocketFactory

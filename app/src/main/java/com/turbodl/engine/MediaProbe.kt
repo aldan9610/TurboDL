@@ -348,7 +348,11 @@ object MediaProbe {
     // ---------------- utilidades HTTP ----------------
 
     private fun open(url: String, range: String?, headers: Map<String, String>): HttpURLConnection {
-        val conn = URL(url).openConnection() as HttpURLConnection
+        // 4.5: proxy opcional (mismo motor que Downloader.open). MediaProbe
+        // es un object sin engine, usamos App.app (singleton global).
+        val proxy = com.turbodl.util.Proxy.javaProxy(com.turbodl.App.app)
+        val conn = (if (proxy != null) URL(url).openConnection(proxy)
+                    else URL(url).openConnection()) as HttpURLConnection
         conn.connectTimeout = 8000
         conn.readTimeout = 8000
         conn.instanceFollowRedirects = true

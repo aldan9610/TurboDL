@@ -71,7 +71,10 @@ object Favicons {
             var b: Bitmap? = null
             try {
                 val u = URL("https://www.google.com/s2/favicons?sz=128&domain=$host")
-                val c = (u.openConnection() as HttpURLConnection).apply {
+                // 4.5: proxy opcional (HTTP/HTTPS/SOCKS).
+                val proxy = Proxy.javaProxy(ctx)
+                val c = ((if (proxy != null) u.openConnection(proxy)
+                          else u.openConnection()) as HttpURLConnection).apply {
                     connectTimeout = 6000
                     readTimeout = 6000
                     setRequestProperty("User-Agent", "Mozilla/5.0")

@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 23
-        versionName "4.4"
+        versionCode 24
+        versionName "4.5"
     }
 
     signingConfigs {
@@ -95,6 +95,12 @@ dependencies {
     implementation 'androidx.media3:media3-exoplayer-hls:1.3.1'
     implementation 'androidx.media3:media3-exoplayer-dash:1.3.1'
     implementation 'androidx.media3:media3-ui:1.3.1'
+    // 4.5: androidx.webkit para ProxyController.setProxyOverride — la API
+    // oficial (Android 9+ con WebView actualizable) para enrutar TODA la
+    // carga del WebView (página + subrecursos) por un proxy HTTP/HTTPS/SOCKS.
+    // minSdk 26 sigue: setProxyOverride se ignora en <9, donde el proxy del
+    // navegador es el del sistema (sin proxy propio) — documentado en UI.
+    implementation 'androidx.webkit:webkit:1.11.0'
     // 4.1: bloqueador de anuncios maduro de Adblock Plus (libadblockplus-android).
     //
     // IMPORTANTE: la AAR se publicaba en jcenter, retirado en 2021. Los

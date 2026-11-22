@@ -56,7 +56,11 @@ object Updater {
     fun latest(): Rel? {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (URL(RELEASES_API).openConnection() as HttpURLConnection).apply {
+            // 4.5: proxy opcional (HTTP/HTTPS/SOCKS). App.app está siempre
+            // inicializado cuando se llama a latest() (desde Settings).
+            val proxy = try { Proxy.javaProxy(com.turbodl.App.app) } catch (t: Throwable) { null }
+            conn = ((if (proxy != null) URL(RELEASES_API).openConnection(proxy)
+                     else URL(RELEASES_API).openConnection()) as HttpURLConnection).apply {
                 connectTimeout = 10000
                 readTimeout = 15000
                 setRequestProperty("Accept", "application/vnd.github+json")
@@ -150,7 +154,10 @@ object Updater {
             dir.mkdirs()
             val dst = File(dir, rel.apkName)
             try {
-                val conn = (URL(rel.apkUrl).openConnection() as HttpURLConnection).apply {
+                // 4.5: proxy opcional (HTTP/HTTPS/SOCKS).
+                val proxy = Proxy.javaProxy(act)
+                val conn = ((if (proxy != null) URL(rel.apkUrl).openConnection(proxy)
+                             else URL(rel.apkUrl).openConnection()) as HttpURLConnection).apply {
                     connectTimeout = 15000
                     readTimeout = 30000
                     instanceFollowRedirects = true

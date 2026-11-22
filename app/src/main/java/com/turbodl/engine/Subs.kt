@@ -107,7 +107,11 @@ object Subs {
 
     /** GET de texto con las cabeceras de la tarea (UA, Referer, Cookie...). */
     private fun getText(task: Task, url: String): String {
-        val conn = URL(url).openConnection() as HttpURLConnection
+        // 4.5: proxy opcional (HTTP/HTTPS/SOCKS). Usamos App.app (singleton
+        // global) porque getText no recibe engine en su firma.
+        val proxy = com.turbodl.util.Proxy.javaProxy(com.turbodl.App.app)
+        val conn = (if (proxy != null) URL(url).openConnection(proxy)
+                    else URL(url).openConnection()) as HttpURLConnection
         conn.connectTimeout = 15000
         conn.readTimeout = 15000
         conn.instanceFollowRedirects = true

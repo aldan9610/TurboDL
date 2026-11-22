@@ -59,6 +59,9 @@ class SettingsActivity : Activity() {
             if (eng.sp.getBoolean("autoResume", false)) "activado" else "desactivado") { toggleAutoResume() }
         row("🔐 Permisos", permText()) { checkPermissions() }
 
+        header("Red")
+        row("🛰 Proxy", proxyText()) { editProxy() }
+
         header("Navegador")
         row("🔎 Motor de búsqueda", engineText()) { pickEngine() }
         row("👤 Perfil de navegación", Profiles.name(eng.sp)) { pickProfile() }
@@ -817,6 +820,156 @@ class SettingsActivity : Activity() {
             .setNegativeButton("Cancelar", null)
             .show()
     }
+
+    // ---------------- proxy (4.5) ----------------
+
+    private fun proxyText(): String {
+        if (!com.turbodl.util.Proxy.isEnabled(this))
+            return "desactivado (conexión directa)"
+        return com.turbodl.util.Proxy.summary(this)
+    }
+
+    /**
+     * Diálogo de configuración de proxy (4.5). Permite elegir tipo
+     * (Ninguno/HTTP/HTTPS-proxy/SOCKS4/SOCKS5) y, si aplica, host, puerto,
+     * usuario y contraseña. Al guardar:
+     *   1. Persiste en SharedPreferences "cfg" (pass cifrada con Secrets).
+     *   2. Reinstala el Authenticator de la JVM (para el motor de descargas).
+     *   3. Reaplica ProxyController (para el WebView).
+     * El proxy afecta a TODO: navegador + descargas HTTP/HTTPS/FTP/subtítulos.
+     */
+    private fun editProxy() {
+        val ctx = this
+        val curType = com.turbodl.util.Proxy.type(this)
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(dp(16), dp(12), dp(16), dp(4))
+
+        // --- tipo de proxy (spinner) ---
+        val typeLabel = TextView(this).apply {
+            text = "Tipo de proxy"
+            textSize = 13f; setTextColor(0xFF888888.toInt()); setPadding(0, 0, 0, dp(4))
+        }
+        lay.addView(typeLabel)
+        val types = com.turbodl.util.Proxy.TYPES
+        val typeNames = types.map { it.second }.toTypedArray()
+        var selType = types.indexOfFirst { it.first == curType }.let { if (it < 0) 0 else it }
+        val typeSpinner = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(ctx,
+                android.R.layout.simple_spinner_item, typeNames)
+            setSelection(selType)
+        }
+        lay.addView(typeSpinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // --- host ---
+        val hostLabel = TextView(this).apply {
+            text = "Host (p. ej. 192.168.1.10 o proxy.mi ISP.com)"
+            textSize = 13f; setColor(0xFF888888.toInt()); setPadding(0, dp(12), 0, dp(4))
+        }
+        lay.addView(hostLabel)
+        val hostEt = android.widget.EditText(this).apply {
+            setSingleLine(true); hint = "host del proxy"
+            setText(com.turbodl.util.Proxy.host(this@SettingsActivity))
+        }
+        lay.addView(hostEt, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // --- puerto ---
+        val portLabel = TextView(this).apply {
+            text = "Puerto (1-65535)"
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+        }
+        lay.addView(portLabel)
+        val portEt = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true); hint = "p. ej. 8080 / 1080"
+            val p = com.turbodl.util.Proxy.port(this@SettingsActivity)
+            if (p in 1..65535) setText(p.toString())
+        }
+        lay.addView(portEt, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // --- usuario ---
+        val userLabel = TextView(this).apply {
+            text = "Usuario (opcional; SOCKS4 no lo admite)"
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+        }
+        lay.addView(userLabel)
+        val userEt = android.widget.EditText(this).apply {
+            setSingleLine(true); hint = "usuario del proxy"
+            setText(com.turbodl.util.Proxy.user(this@SettingsActivity))
+        }
+        lay.addView(userEt, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // --- contraseña ---
+        val passLabel = TextView(this).apply {
+            text = "Contraseña (opcional)"
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+        }
+        lay.addView(passLabel)
+        val passEt = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true); hint = "contraseña del proxy"
+            setText(com.turbodl.util.Proxy.pass(this@SettingsActivity))
+        }
+        lay.addView(passEt, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val info = TextView(this).apply {
+            text = "El proxy enruta TODO el tráfico (navegador y descargas). " +
+                "FTP solo admite SOCKS (no HTTP-proxy). El navegador " +
+                "requiere Android 9+ con WebView actualizable; en versiones " +
+                "anteriores el navegador usa el proxy del sistema."
+            textSize = 12f; setPadding(0, dp(12), 0, 0); setTextColor(0xFF888888.toInt())
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
+        lay.addView(info)
+
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("🛰 Proxy de red")
+            .setView(lay)
+            .setPositiveButton("Guardar") { _, _ ->
+                val t = types[typeSpinner.selectedItemPosition].first
+                val h = hostEt.text.toString().trim()
+                val p = portEt.text.toString().trim().toIntOrNull() ?: 0
+                val u = userEt.text.toString().trim()
+                val pw = passEt.text.toString()
+                // Validar: si tipo != none, host y puerto son obligatorios.
+                if (t != com.turbodl.util.Proxy.TYPE_NONE) {
+                    if (h.isEmpty() || p !in 1..65535) {
+                        toast("Falta host o puerto (1-65535)"); return@setPositiveButton
+                    }
+                    // SOCKS4 no admite credenciales: avisar y descartarlas.
+                    if (t == com.turbodl.util.Proxy.TYPE_SOCKS4 && u.isNotEmpty()) {
+                        toast("SOCKS4 no admite usuario/contraseña"); return@setPositiveButton
+                    }
+                }
+                com.turbodl.util.Proxy.save(this, t, h, p, u, pw)
+                // Reinstalar proxy global (Authenticator + WebView).
+                com.turbodl.util.Proxy.installAuthenticator(this)
+                com.turbodl.util.Proxy.applyToWebView(this)
+                buildUi()
+                toast(if (t == com.turbodl.util.Proxy.TYPE_NONE)
+                    "Proxy desactivado (conexión directa)"
+                else "Proxy guardado: ${com.turbodl.util.Proxy.summary(this)}")
+            }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dlg.show()
+    }
+
+    /** atajo para setColor en un TextView dentro de editProxy. */
+    private fun TextView.setColor(c: Int) { setTextColor(c) }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 }

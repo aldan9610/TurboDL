@@ -1,10 +1,42 @@
-# TurboDL 4.4
+# TurboDL 4.5
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.5 — proxy de red para todo el tráfico (HTTP, HTTPS-proxy, SOCKS4, SOCKS5)
+
+La 4.5 añade un proxy configurable que enruta **TODO el tráfico** de
+TurboDL —navegador y motor de descargas— a través de un proxy de red.
+
+### 🛰 Tipos soportados
+- **HTTP** — proxy HTTP clásico (CONNECT para HTTPS).
+- **HTTPS-proxy** — proxy que habla TLS (RFC 2817).
+- **SOCKS4** — sin credenciales (SOCKS4 no las admite).
+- **SOCKS5** — con auth opcional (usuario/contraseña).
+- **Ninguno** — conexión directa (por defecto).
+
+### 🌐 Qué se enruta por el proxy
+TODO: navegador (WebView vía `ProxyController.setProxyOverride`, Android
+9+), descargas HTTP/HTTPS/HLS/DASH, sonda de medios, subtítulos,
+metadatos .torrent, favicons, actualizaciones y FTP (vía SOCKS; FTP no
+admite proxy HTTP).
+
+### 🔐 Credenciales
+HTTP, HTTPS-proxy y SOCKS5 admiten usuario/contraseña; la contraseña se
+guarda cifrada (AES-256-GCM, AndroidKeyStore). SOCKS4 no las admite.
+
+### ⚙️ UI
+Ajustes → **Red** → 🛰 **Proxy**: selector de tipo + host + puerto +
+usuario + contraseña. Al guardar se reaplica en caliente (sin reiniciar).
+
+### 📦 Internas
+- versionCode 24, versionName 4.5. Misma firma que 4.3/4.4. 129 tests JVM
+  pasan (0 fallos). Nueva dependencia `androidx.webkit:webkit:1.11.0`.
+
+---
 
 ## Novedades de la 4.4 — cambio de usuario funcional (sandbox real, estilo lfbrowser)
 

@@ -26,7 +26,12 @@ abstract class Downloader(val task: Task, val engine: Engine) {
         get() = engine.userAgent()
 
     protected fun open(url: String, range: String? = null): HttpURLConnection {
-        val conn = URL(url).openConnection() as HttpURLConnection
+        // 4.5: proxy opcional (HTTP/HTTPS/SOCKS). Si está activo, se abre
+        // la conexión a través de él; el Authenticator global (instalado
+        // en App.onCreate) aporta user/pass para CONNECT/SOCKS5.
+        val proxy = com.turbodl.util.Proxy.javaProxy(engine.ctx)
+        val conn = (if (proxy != null) URL(url).openConnection(proxy)
+                    else URL(url).openConnection()) as HttpURLConnection
         conn.connectTimeout = 20000
         conn.readTimeout = 20000
         conn.instanceFollowRedirects = true

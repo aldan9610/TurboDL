@@ -13,6 +13,14 @@ class App : Application() {
         // WebView se fija ANTES de crear cualquier WebView; el usuario
         // "main" no usa sufijo (comportamiento clásico sin cambios)
         com.turbodl.util.Users.applyDataDirSuffix(this)
+        // 4.5: instalar proxy global ANTES de cualquier conexión:
+        //   · Authenticator de la JVM para credenciales del proxy (HTTP
+        //     CONNECT y SOCKS5 user/pass). El motor de descargas lo usa.
+        //   · ProxyController del WebView para enrutar toda la carga del
+        //     navegador (página + subrecursos). Android 9+ con WebView
+        //     actualizable; en <9 se ignora y se usa el proxy del sistema.
+        com.turbodl.util.Proxy.installAuthenticator(this)
+        com.turbodl.util.Proxy.applyToWebView(this)
         // registro local de fallos (sin telemetría): lo primero, para no
         // perder ni el crash que ocurra durante el arranque
         com.turbodl.util.CrashLog.install(this)

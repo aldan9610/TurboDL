@@ -1,3 +1,115 @@
+# TurboDL 4.5 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Proxy de red (HTTP, HTTPS-proxy, SOCKS4, SOCKS5) para todo el tráfico
+
+Pediste: *"añadir la posibilidad de navegar usando un proxy http, socks
+y alguna otra variante de proxy que pueda existir"*. La 4.5 añade un
+proxy configurable que enruta **TODO el tráfico** de TurboDL —navegador y
+motor de descargas— a través de un proxy de red.
+
+### Tipos soportados
+
+- **HTTP** — proxy HTTP clásico (CONNECT para HTTPS). El más común.
+- **HTTPS-proxy** — proxy que a su vez habla TLS (RFC 2817). Útil cuando el
+  proxy está en una red que inspecciona el tráfico.
+- **SOCKS4** — proxy SOCKS4 (sin credenciales; SOCKS4 no las admite).
+- **SOCKS5** — proxy SOCKS5 con auth opcional (usuario/contraseña).
+- **Ninguno** — conexión directa (por defecto).
+
+### Qué tráfico se enruta por el proxy
+
+TODO el tráfico de red de la app:
+
+- **Navegador (WebView):** TODA la carga —página + subrecursos (HTML, CSS,
+  JS, imágenes, XHR, fetch)— por `androidx.webkit ProxyController
+  .setProxyOverride` (API oficial de Android 9+). Requiere Android 9+ con
+  WebView actualizable; en Android 8 el navegador usa el proxy del sistema.
+- **Descargas HTTP/HTTPS:** `HttpDownloader`, `HlsDownloader`, `DashDownloader`.
+- **Sonda de medios (MediaProbe):** el chequeo de cabeceras/rangos antes
+  de descargar MP4/HLS/DASH.
+- **Subtítulos (Subs):** las descargas de .vtt/.srt.
+- **Metadatos .torrent (TorrentDownloader):** la descarga del .torrent por HTTP.
+- **Favicons:** los iconos de los sitios.
+- **Actualizaciones:** la comprobación de nuevas versiones y la descarga
+  del APK de actualización.
+- **FTP/FTPS:** vía SOCKS (`Socket(Proxy)` en los sockets de control y
+  datos). FTP **no admite proxy HTTP** (HTTP CONNECT no encaja con el
+  protocolo FTP de control+datos); para FTP usa SOCKS4 o SOCKS5.
+
+### Credenciales del proxy
+
+- HTTP, HTTPS-proxy y SOCKS5 admiten usuario/contraseña.
+- SOCKS4 **no admite credenciales** (la UI lo avisa si intentas meterlas).
+- La contraseña se guarda **cifrada** con `Secrets.encrypt` (AES-256-GCM,
+  clave en AndroidKeyStore) — el mismo mecanismo que las credenciales
+  HTTP de la tabla `creds`.
+
+### Cómo funciona
+
+- **Motor de descargas:** cada `URL.openConnection()` se hace con
+  `Proxy.openConnection(javaProxy)` cuando hay proxy. Un
+  `Authenticator` global (instalado en `App.onCreate`) responde a las
+  solicitudes de auth del proxy (Basic/Digest para HTTP CONNECT,
+  user/pass para SOCKS5) sin tocar la auth del servidor final.
+- **WebView:** `ProxyController.setProxyOverride` aplica la regla proxy a
+  toda la carga del WebView (página + subrecursos). El proxyUrl lleva el
+  esquema (`http://`, `https://`, `socks5://`) y, opcionalmente, el
+  `user:pass` embebido (URL-codificado). Es global a la app: no se
+  configura por WebView, se aplica una vez al arrancar y al cambiarlo.
+
+### UI
+
+Ajustes → nueva sección **"Red"** → **🛰 Proxy**. Diálogo con:
+- **Selector de tipo** (Ninguno / HTTP / HTTPS-proxy / SOCKS4 / SOCKS5).
+- **Host** (IP o dominio).
+- **Puerto** (1-65535).
+- **Usuario** (opcional; deshabilitado para SOCKS4).
+- **Contraseña** (opcional; cifrada al guardar).
+- Texto explicativo de las limitaciones (FTP solo SOCKS; navegador
+  requiere Android 9+).
+
+Al guardar, se reinstala el `Authenticator` y se reaplica
+`ProxyController` en caliente (sin reiniciar la app).
+
+### Configuración
+
+- `SharedPreferences "cfg"`:
+  - `proxyType`: "none" | "http" | "https" | "socks4" | "socks5".
+  - `proxyHost`, `proxyPort` (Int 1-65535).
+  - `proxyUser`.
+  - `proxyPassEnc` (cifrada con `Secrets`).
+- Nueva clase `util/Proxy.kt` centraliza toda la lógica.
+- Nueva dependencia `androidx.webkit:webkit:1.11.0` (para
+  `ProxyController`/`ProxyConfig`).
+
+### Internas
+
+- `versionCode` 24, `versionName` 4.5.
+- `Proxy.javaProxy(ctx)` → `java.net.Proxy` (HTTP→Type.HTTP,
+  SOCKS→Type.SOCKS) para el motor de descargas.
+- `Proxy.javaSocket(ctx)` → `Socket(Proxy)` para FTP (solo SOCKS).
+- `Proxy.installAuthenticator(ctx)` → `Authenticator.setDefault` global
+  (solo responde a `RequestorType.PROXY`, no a auth de servidor).
+- `Proxy.applyToWebView(ctx)` → `ProxyController.setProxyOverride` /
+  `clearProxyOverride` con `ProxyConfig.Builder.addProxyRule`.
+- Puntos tocados: `Downloader.open`, `MediaProbe.open`, `Subs.getText`,
+  `TorrentDownloader`, `Favicons.fetchAsync`, `Updater.latest` y
+  `Updater.downloadAndInstall`, `FtpDownloader` (sockets ctl+data),
+  `App.onCreate` (instalación al arrancar), `SettingsActivity`
+  (sección "Red" + diálogo).
+- 129 tests JVM pasan (0 fallos).
+
+### Instalación
+
+```
+adb install -r TurboDL-4.5.apk
+```
+Misma firma que 4.3/4.4 → se actualiza sin desinstalar. Android 8.0+.
+
+---
+
 # TurboDL 4.4 — Notas de la versión
 
 Fecha: 2026-11-22

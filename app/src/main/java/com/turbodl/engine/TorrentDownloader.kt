@@ -160,7 +160,10 @@ class TorrentDownloader(task: Task, engine: Engine) : Downloader(task, engine) {
         }
         if (u.startsWith("http://") || u.startsWith("https://")) {
             val dst = File(engine.ctx.cacheDir, "torrent_" + System.currentTimeMillis() + ".torrent")
-            val conn = java.net.URL(u).openConnection() as java.net.HttpURLConnection
+            // 4.5: proxy opcional (HTTP/HTTPS/SOCKS).
+            val proxy = com.turbodl.util.Proxy.javaProxy(engine.ctx)
+            val conn = (if (proxy != null) java.net.URL(u).openConnection(proxy)
+                        else java.net.URL(u).openConnection()) as java.net.HttpURLConnection
             conn.connectTimeout = 15000
             conn.readTimeout = 15000
             conn.setRequestProperty("User-Agent", EngineHolder.ua)
