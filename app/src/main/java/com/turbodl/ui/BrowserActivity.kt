@@ -4855,120 +4855,319 @@ class BrowserActivity : Activity() {
 
     // ---------------- usuarios sandbox (F2) ----------------
 
+    /**
+     * Diálogo de usuarios (4.4, estilo lfbrowser): pantalla completa con
+     * título "USUARIOS", texto explicativo, acción "AGREGAR" arriba a la
+     * derecha, lista de filas (avatar circular + identificador del
+     * usuario subrayado + radio button exclusivo) y botones CANCELAR /
+     * CAMBIAR abajo (CAMBIAR en naranja). Mantén pulsada una fila para
+     * editarla (renombrar / cambiar email / eliminar).
+     *
+     * 4.4: arregla el bug de la 4.2/4.3 por el que el cambio de usuario
+     * "solo mostraba un mensaje". El cambio era cosmético porque
+     * restartApp (killProcess) dejaba que Android reusara el proceso y
+     * applyDataDirSuffix no cambiaba el sufijo en caliente. Ahora
+     * restartApp usa AlarmManager + System.exit(0) (reciclado real del
+     * proceso), y antes de cambiar se vuelcan las cookies del usuario
+     * saliente con Users.flushCookies().
+     */
     private fun showUsersDialog() {
-        val users = Users.list(this)
-        val active = Users.active(this)
-        val opts = ArrayList<String>()
-        opts.add("🏠 Principal" + (if (active == "main") "   (activo)" else ""))
-        users.forEach { opts.add("👤 ${it.name}" + (if (active == it.id) "   (activo)" else "")) }
-        opts.add("＋ Añadir usuario…")
-        opts.add("✏ Renombrar usuario…")
-        opts.add("👁 Ver sandbox del usuario activo…")
-        opts.add("🗑 Eliminar usuario…")
-        AlertDialog.Builder(this)
-            .setTitle("👥 Usuarios (sandbox por usuario)")
-            .setMessage("Cada usuario tiene sus propias cookies, sesiones, credenciales, historial y accesos: los sitios web solo detectan al usuario activo. Al cambiar, la aplicación se reinicia.")
-            .setItems(opts.toTypedArray()) { _, w ->
-                when {
-                    w == opts.size - 1 -> deleteUsersDialog()
-                    w == opts.size - 2 -> showSandboxViewer()
-                    w == opts.size - 3 -> renameUserDialog()
-                    w == opts.size - 4 -> addAndSwitchUser()
-                    w == 0 -> if (active != "main") confirmSwitchUser("main")
-                    else -> {
-                        val u = users[w - 1]
-                        if (u.id != active) confirmSwitchUser(u.id)
+        var users = Users.list(this)
+        var active = Users.active(this)
+        var selected = active  // radio button: el que se cambiará al pulsar CAMBIAR
+
+        // ---- contenedor raíz ----
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setPadding(dp(20), dp(20), dp(20), dp(20))
+        root.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT)
+
+        // ---- título "USUARIOS" + acción "AGREGAR" ----
+        val topRow = LinearLayout(this)
+        topRow.orientation = LinearLayout.HORIZONTAL
+        topRow.gravity = Gravity.CENTER_VERTICAL
+        val titleTv = TextView(this)
+        titleTv.text = "USUARIOS"
+        titleTv.setTypeface(titleTv.typeface, android.graphics.Typeface.BOLD)
+        titleTv.textSize = 20f
+        titleTv.setTextColor(0xFF212121.toInt())
+        val tlp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
+        tlp.weight = 1f
+        titleTv.layoutParams = tlp
+        val addTv = TextView(this)
+        addTv.text = "AGREGAR"
+        addTv.setTypeface(addTv.typeface, android.graphics.Typeface.BOLD)
+        addTv.textSize = 14f
+        addTv.setTextColor(0xFF1E88E5.toInt())
+        addTv.setPadding(dp(12), dp(8), dp(12), dp(8))
+        topRow.addView(titleTv)
+        topRow.addView(addTv)
+        root.addView(topRow)
+
+        // ---- texto descriptivo ----
+        val descTv = TextView(this)
+        descTv.text = "Puedes cambiar entre múltiples cuentas de usuario en este navegador. Cada una mantiene sus propias credenciales."
+        descTv.textSize = 13f
+        descTv.setTextColor(0xFF616161.toInt())
+        descTv.setLineSpacing(dp(2).toFloat(), 1f)
+        descTv.setPadding(0, dp(8), 0, dp(12))
+        root.addView(descTv)
+
+        // ---- lista de usuarios (ScrollView con filas) ----
+        val scroll = android.widget.ScrollView(this)
+        val listHost = LinearLayout(this)
+        listHost.orientation = LinearLayout.VERTICAL
+        scroll.addView(listHost, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+        root.addView(scroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0).apply { weight = 1f })
+
+        val dlg = AlertDialog.Builder(this)
+            .setView(root)
+            .create()
+
+        // Construye una fila de usuario (avatar + identificador + radio).
+        // Mantén pulsada la fila → menú editar/eliminar.
+        fun buildRow(u: Users.U, isMain: Boolean): View {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPadding(dp(8), dp(12), dp(8), dp(12))
+            row.layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+
+            // Avatar circular genérico (silueta de persona sobre círculo
+            // azul claro, estilo lfbrowser).
+            val avatar = TextView(this)
+            avatar.text = "👤"
+            avatar.textSize = 20f
+            avatar.gravity = Gravity.CENTER
+            val avSize = dp(40)
+            val avBg = android.graphics.drawable.GradientDrawable()
+            avBg.setColor(0xFFE3F2FD.toInt())
+            avBg.cornerRadius = avSize / 2f
+            avatar.background = avBg
+            avatar.layoutParams = LinearLayout.LayoutParams(avSize, avSize)
+            row.addView(avatar)
+
+            // Identificador (email si lo hay, si no nombre) subrayado.
+            val identTv = TextView(this)
+            val ident = if (isMain) "Principal" else u.email.ifEmpty { u.name.ifEmpty { u.id } }
+            identTv.text = ident
+            identTv.textSize = 15f
+            identTv.setTextColor(0xFF212121.toInt())
+            identTv.paint.isUnderlineText = true
+            identTv.setPadding(dp(14), 0, 0, 0)
+            val ilp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
+            ilp.weight = 1f
+            identTv.layoutParams = ilp
+            row.addView(identTv)
+
+            // Radio button (exclusivo: solo uno marcado).
+            val radio = android.widget.RadioButton(this)
+            radio.isChecked = (u.id == selected)
+            radio.isClickable = false   // el clic lo gestiona la fila entera
+            radio.isEnabled = false
+            row.addView(radio)
+
+            // Toque simple: selecciona (marca el radio). Pulsar CAMBIAR
+            // aplica el cambio.
+            row.setOnClickListener {
+                selected = u.id
+                listHost.post {
+                    for (i in 0 until listHost.childCount) {
+                        val ch = listHost.getChildAt(i)
+                        val r = ch.findViewById<android.widget.RadioButton>(android.R.id.text1)
+                            ?: ch.findViewWithTag<android.widget.RadioButton>("radio")
+                        r?.isChecked = (ch.tag == selected)
                     }
                 }
             }
-            .setNegativeButton("Cerrar", null)
-            .show()
-    }
+            row.tag = u.id
+            radio.tag = "radio"
 
-    private fun confirmSwitchUser(id: String) {
-        AlertDialog.Builder(this)
-            .setTitle("Cambiar de usuario")
-            .setMessage("TurboDL se reiniciará con la sandbox de «${Users.nameOf(this, id)}»: sus cookies y credenciales son independientes y el servidor creerá que solo ese usuario ha accedido.")
-            .setPositiveButton("Reiniciar") { _, _ ->
-                Users.setActive(this, id)
-                Users.restartApp(this)
+            // Pulsación larga: menú editar/eliminar (no aplica a main).
+            if (!isMain) {
+                row.setOnLongClickListener {
+                    val acts = arrayOf("✏ Renombrar / editar email", "🗑 Eliminar usuario")
+                    AlertDialog.Builder(this)
+                        .setTitle(ident)
+                        .setItems(acts) { _, w ->
+                            when (w) {
+                                0 -> editUserDialog(u) {
+                                    users = Users.list(this)
+                                    selected = active
+                                    dlg.dismiss()
+                                    showUsersDialog()
+                                }
+                                1 -> confirmDeleteUser(u) {
+                                    users = Users.list(this)
+                                    active = Users.active(this)
+                                    selected = active
+                                    dlg.dismiss()
+                                    if (Users.active(this) == "main" && active != "main") {
+                                        // ya se reinició
+                                    } else {
+                                        showUsersDialog()
+                                    }
+                                }
+                            }
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                    true
+                }
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            return row
+        }
+
+        fun rebuildList() {
+            listHost.removeAllViews()
+            // main primero
+            listHost.addView(buildRow(Users.U("main", "Principal", ""), isMain = true))
+            // divisor
+            for (u in users) {
+                val div = android.view.View(this)
+                div.setBackgroundColor(0xFFE0E0E0.toInt())
+                div.layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 1)
+                listHost.addView(div)
+                listHost.addView(buildRow(u, isMain = false))
+            }
+        }
+        rebuildList()
+
+        // AGREGAR: crea un usuario nuevo con nombre + email.
+        addTv.setOnClickListener { addAndSwitchUser { dlg.dismiss() } }
+
+        // ---- botones CANCELAR / CAMBIAR (CAMBIAR en naranja) ----
+        val btnRow = LinearLayout(this)
+        btnRow.orientation = LinearLayout.HORIZONTAL
+        btnRow.setPadding(0, dp(16), 0, 0)
+        val cancelBtn = Button(this)
+        cancelBtn.text = "CANCELAR"
+        cancelBtn.setTextColor(0xFF616161.toInt())
+        cancelBtn.setBackgroundColor(0xFFE0E0E0.toInt())
+        cancelBtn.setPadding(dp(16), dp(12), dp(16), dp(12))
+        val clp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
+        clp.weight = 1f
+        clp.marginEnd = dp(8)
+        cancelBtn.layoutParams = clp
+        val changeBtn = Button(this)
+        changeBtn.text = "CAMBIAR"
+        changeBtn.setTextColor(0xFFFFFFFF.toInt())
+        changeBtn.setBackgroundColor(0xFFF5A623.toInt())
+        changeBtn.setPadding(dp(16), dp(12), dp(16), dp(12))
+        changeBtn.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { weight = 1f }
+        btnRow.addView(cancelBtn)
+        btnRow.addView(changeBtn)
+        root.addView(btnRow)
+
+        cancelBtn.setOnClickListener { dlg.dismiss() }
+        changeBtn.setOnClickListener {
+            if (selected == active) { dlg.dismiss(); return@setOnClickListener }
+            Users.setActive(this, selected)
+            toast("Cambiando a «${Users.displayOf(this, selected)}» — TurboDL se reinicia…")
+            Users.restartApp(this)
+        }
+
+        dlg.show()
     }
 
-    private fun addAndSwitchUser() {
-        val e = android.widget.EditText(this)
-        e.hint = "Nombre del usuario (p. ej. Trabajo)"
+    /** Crea un usuario nuevo con nombre + email (4.4, estilo lfbrowser). */
+    private fun addAndSwitchUser(onCreated: () -> Unit) {
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(dp(16), dp(8), dp(16), dp(4))
+        val eName = android.widget.EditText(this)
+        eName.hint = "Nombre (p. ej. Trabajo, Personal…)"
+        eName.setSingleLine(true)
+        val eEmail = android.widget.EditText(this)
+        eEmail.hint = "Correo (p. ej. al2dan9610@gmail.com)"
+        eEmail.inputType = android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        eEmail.setSingleLine(true)
+        lay.addView(eName, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+        val elp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        elp.topMargin = dp(8)
+        eEmail.layoutParams = elp
+        lay.addView(eEmail)
         AlertDialog.Builder(this)
             .setTitle("Nuevo usuario")
-            .setView(e)
+            .setView(lay)
             .setPositiveButton("Crear") { _, _ ->
-                val n = e.text.toString().trim().ifEmpty { "Usuario" }
-                val u = Users.add(this, n)
-                confirmSwitchUser(u.id)
+                val n = eName.text.toString().trim().ifEmpty { "Usuario" }
+                val em = eEmail.text.toString().trim()
+                Users.add(this, n, em)
+                onCreated()
+                toast("Usuario «$n» creado. Mantenlo pulsado para editar o eliminar.")
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    /** 4.2: CRUD completo — Renombrar un usuario existente. Antes solo se
-     *  podía crear y eliminar. El id no cambia, así que todo el sandbox
-     *  (cookies, history, creds, marcadores) se conserva al renombrar. */
-    private fun renameUserDialog() {
-        val users = Users.list(this)
-        if (users.isEmpty()) { toast("No hay usuarios adicionales"); return }
-        val names = users.map { it.name }.toTypedArray()
+    /** Edita nombre y email de un usuario existente (4.4). */
+    private fun editUserDialog(u: Users.U, onDone: () -> Unit) {
+        val lay = LinearLayout(this)
+        lay.orientation = LinearLayout.VERTICAL
+        lay.setPadding(dp(16), dp(8), dp(16), dp(4))
+        val eName = android.widget.EditText(this)
+        eName.hint = "Nombre"
+        eName.setSingleLine(true)
+        eName.setText(u.name)
+        val eEmail = android.widget.EditText(this)
+        eEmail.hint = "Correo"
+        eEmail.inputType = android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        eEmail.setSingleLine(true)
+        eEmail.setText(u.email)
+        lay.addView(eName, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
+        val elp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        elp.topMargin = dp(8)
+        eEmail.layoutParams = elp
+        lay.addView(eEmail)
         AlertDialog.Builder(this)
-            .setTitle("Renombrar usuario")
-            .setItems(names) { _, w ->
-                val u = users[w]
-                val e = android.widget.EditText(this)
-                e.hint = "Nuevo nombre"
-                e.setText(u.name)
-                AlertDialog.Builder(this)
-                    .setTitle("Renombrar a «${u.name}»")
-                    .setView(e)
-                    .setPositiveButton("Renombrar") { _, _ ->
-                        val n = e.text.toString().trim()
-                        if (n.isNotEmpty() && n != u.name) {
-                            Users.rename(this, u.id, n)
-                            toast("Usuario renombrado a «$n»")
-                        }
-                    }
-                    .setNegativeButton("Cancelar", null)
-                    .show()
+            .setTitle("Editar usuario")
+            .setView(lay)
+            .setPositiveButton("Guardar") { _, _ ->
+                Users.update(this, u.id,
+                    name = eName.text.toString().trim(),
+                    email = eEmail.text.toString().trim())
+                onDone()
+                toast("Usuario actualizado")
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
 
-    private fun deleteUsersDialog() {
-        val users = Users.list(this)
-        if (users.isEmpty()) { toast("No hay usuarios adicionales"); return }
-        val names = users.map { it.name }.toTypedArray()
+    /** Confirma el borrado de un usuario y su sandbox completo (4.4). */
+    private fun confirmDeleteUser(u: Users.U, onDone: () -> Unit) {
         AlertDialog.Builder(this)
-            .setTitle("Eliminar usuario")
-            .setItems(names) { _, w ->
-                val u = users[w]
-                AlertDialog.Builder(this)
-                    .setTitle("Eliminar a «${u.name}»")
-                    .setMessage("Se borra SU SANDBOX COMPLETO: cookies, localStorage y " +
-                        "caché del WebView, credenciales, historial de navegación, " +
-                        "marcadores y accesos. Esta acción no se puede deshacer.")
-                    .setPositiveButton("Eliminar") { _, _ ->
-                        val eraActivo = Users.active(this) == u.id
-                        // 4.2: limpiar datos del usuario en DB antes de
-                        // borrarlo de la lista (Users.remove borra archivos
-                        // y SharedPrefs; aquí borramos las filas de DB).
-                        try { eng.db.clearHistory(u.id) } catch (e: Exception) { }
-                        try { eng.db.clearCreds(u.id) } catch (e: Exception) { }
-                        Users.remove(this, u.id)
-                        toast("Usuario eliminado (sandbox borrado)")
-                        if (eraActivo) Users.restartApp(this)
-                    }
-                    .setNegativeButton("Cancelar", null)
-                    .show()
+            .setTitle("Eliminar a «${u.email.ifEmpty { u.name }}»")
+            .setMessage("Se borra SU SANDBOX COMPLETO: cookies, localStorage y " +
+                "caché del WebView, credenciales, historial de navegación, " +
+                "marcadores y accesos. Esta acción no se puede deshacer.")
+            .setPositiveButton("Eliminar") { _, _ ->
+                val eraActivo = Users.active(this) == u.id
+                try { eng.db.clearHistory(u.id) } catch (e: Exception) { }
+                try { eng.db.clearCreds(u.id) } catch (e: Exception) { }
+                Users.remove(this, u.id)
+                toast("Usuario eliminado (sandbox borrado)")
+                if (eraActivo) {
+                    Users.restartApp(this)
+                } else {
+                    onDone()
+                }
             }
             .setNegativeButton("Cancelar", null)
             .show()

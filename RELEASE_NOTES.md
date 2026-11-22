@@ -1,3 +1,109 @@
+# TurboDL 4.4 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Cambio de usuario funcional (sandbox real, estilo lfbrowser)
+
+Reportaste: *"para la próxima versión hagas funcional la utilidad de
+cambiar de usuario; actualmente solo me dice un mensaje pero quiero que
+sea funcional: lo que debe hacer es aislar el entorno del navegador
+(cookies, etc.) para poder usar múltiples credenciales, por ejemplo de
+Google y otros servicios, y poder cambiar de cuentas fácilmente. Una
+funcionalidad similar a la que tiene lfbrowser"*.
+
+### Causa raíz: por qué "solo mostraba un mensaje"
+
+El cambio de usuario **ya existía** (no era solo un toast), pero era
+**frágil y engañoso**: `restartApp` hacía `Process.killProcess(myPid())`
+tras `sleep(120)`. Android suele **reusar el proceso reciclado**, así que
+`App.onCreate` se volvía a correr en el mismo proceso y
+`Users.applyDataDirSuffix` veía `appliedSuffix != null` (el sufijo del
+usuario anterior ya fijado) y **dejaba el sufijo anterior** sin cambiarlo.
+Resultado: `SharedPreferences.activeUser` decía "usuario B activo", pero el
+`WebView` seguía usando el directorio del usuario A → las cookies y la
+sesión de Google seguían siendo las del usuario A. El usuario lo percibía
+como "solo me dice un mensaje, no cambia nada".
+
+### Solución 1: reinicio robusto con AlarmManager + System.exit(0)
+
+`Users.restartApp` ahora:
+1. Vuelca las cookies del usuario saliente a disco con
+   `CookieManager.getInstance().flush()` (la sesión del usuario que sale
+   queda persistida en su sandbox).
+2. Programa con `AlarmManager` un relanzamiento del launcher intent dentro
+   de ~1 segundo (`RTC_WAKEUP`, `PendingIntent.getActivity`).
+3. Llama a `System.exit(0)`. A diferencia de `killProcess`, `exit` termina
+   la VM de forma que Android **no puede reusar** la instancia de
+   `Application`: el siguiente `App.onCreate` crea un proceso **nuevo** y
+   `applyDataDirSuffix` fija el sufijo del nuevo usuario correctamente.
+
+### Solución 2: UI de usuarios reescrita estilo lfbrowser
+
+La UI anterior era un `AlertDialog` simple con una lista de texto y
+acciones ocultas al final (renombrar, ver sandbox, eliminar). Se reescribe
+como un **diálogo a pantalla completa** inspirado en lfbrowser:
+
+- **Título "USUARIOS"** en negrita, con acción **"AGREGAR"** (azul) arriba
+  a la derecha.
+- **Texto descriptivo**: "Puedes cambiar entre múltiples cuentas de
+  usuario en este navegador. Cada una mantiene sus propias credenciales."
+- **Lista de filas**, cada una con: **avatar circular** (silueta de
+  persona sobre círculo azul claro) + **identificador del usuario
+  subrayado** (el correo, como en lfbrowser) + **radio button exclusivo**
+  (solo uno marcado).
+- **Botones CANCELAR (gris) / CAMBIAR (naranja)** abajo. Pulsar CAMBIAR
+  aplica el cambio al usuario seleccionado y reinicia la app.
+- **Mantén pulsada** una fila para editarla (renombrar / cambiar email /
+  eliminar) — no aplica al usuario "Principal".
+
+### Solución 3: identificador de usuario (email)
+
+La clase `Users.U` ahora lleva un **`email`** además del `name` (etiqueta
+libre). Se persiste en el JSON con key `"e"` (backward-compatible: los
+usuarios viejos sin email se muestran con el nombre como fallback). Así
+cada cuenta puede identificarse por su correo (como en lfbrowser). El
+diálogo de **"AGREGAR"** pide nombre + correo; el de **editar** permite
+cambiar ambos.
+
+### Flujo completo de cambio de cuenta (ej: dos cuentas de Google)
+
+1. Menú → **👥 Usuarios** → se abre el diálogo a pantalla completa.
+2. Pulsas **AGREGAR** → escribes "Trabajo" y "trabajo@gmail.com" → se crea.
+3. En la lista, tocas la fila de "Trabajo" → su radio se marca.
+4. Pulsas **CAMBIAR** (naranja) → la app vuelca las cookies de la cuenta
+   actual, programa el relanzamiento y sale. Al volver a abrir, arranca
+   en la sandbox de "Trabajo" (directorio `app_webview/usr_<id>/` propio):
+   Google y cualquier otro sitio ven una sesión **limpia**. Inicias sesión
+   con la cuenta de Trabajo.
+5. Para volver: mismo diálogo → tocas "Personal" → **CAMBIAR** → la app
+   reinicia en la sandbox de Personal, donde tu sesión de Google personal
+   sigue **logueada** (se guardó al salir).
+
+### Internas
+
+- `versionCode` 23, `versionName` 4.4.
+- `Users.restartApp`: `AlarmManager` + `System.exit(0)` (antes
+  `killProcess` + `sleep`).
+- `Users.flushCookies()`: vuelca `CookieManager` antes de cambiar.
+- `Users.U`: nuevo campo `email` + `Users.update()` para editarlo.
+- `Users.displayOf()`: identificador visible (email → name → id).
+- `showUsersDialog` reescrito (diálogo completo estilo lfbrowser):
+  avatar + identificador subrayado + radio + CANCELAR/CAMBIAR.
+- `addAndSwitchUser` / `editUserDialog` / `confirmDeleteUser`: nuevos
+  (sustituyen a `renameUserDialog` / `deleteUsersDialog`).
+- `AndroidManifest.allowBackup=false` (evita que el backup/restore mezcle
+  sandboxes de usuarios distintos).
+- 129 tests JVM pasan (0 fallos).
+
+### Instalación
+
+```
+adb install -r TurboDL-4.4.apk
+```
+Misma firma que 4.3 → se actualiza sin desinstalar. Android 8.0+.
+
+---
+
 # TurboDL 4.3 — Notas de la versión
 
 Fecha: 2026-11-22

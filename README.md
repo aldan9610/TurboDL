@@ -1,10 +1,42 @@
-# TurboDL 4.3
+# TurboDL 4.4
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.4 — cambio de usuario funcional (sandbox real, estilo lfbrowser)
+
+La 4.4 hace que el cambio de usuario sea **real**: cada usuario tiene su
+propio sandbox de cookies/LocalStorage/caché del WebView, y cambiar de
+cuenta reinicia la app en la sandbox del usuario elegido (como lfbrowser).
+
+### 🔄 El bug de "solo me dice un mensaje"
+El cambio existía pero era engañoso: `restartApp` hacía `killProcess` y
+Android reusaba el proceso → `applyDataDirSuffix` no cambiaba el sufijo →
+las cookies seguían siendo del usuario anterior. Ahora `restartApp` usa
+`AlarmManager` + `System.exit(0)` (reciclado real del proceso) y vuelca las
+cookies del usuario saliente antes de salir.
+
+### 👥 UI de usuarios estilo lfbrowser
+Diálogo a pantalla completa: título "USUARIOS" + acción "AGREGAR" (azul),
+lista de filas (avatar circular + identificador subrayado + radio button
+exclusivo) y botones CANCELAR (gris) / CAMBIAR (naranja). Mantén pulsada una
+fila para editar (renombrar/cambiar email) o eliminar. Cada usuario puede
+identificarse por su correo.
+
+### 🔐 Aislamiento real
+Cada usuario no-principal monta `app_webview/usr_<id>/` propio → cookies,
+LocalStorage, IndexedDB y caché separados. Dos cuentas de Google pueden
+estar logueadas a la vez (cada una en su sandbox) y cambiar entre ellas
+con un toque.
+
+### 📦 Internas
+- versionCode 23, versionName 4.4. Misma firma que 4.3 (actualización sin
+  desinstalar). 129 tests JVM pasan (0 fallos). `allowBackup=false`.
+
+---
 
 ## Novedades de la 4.3 — notas del navegador funcionales (CRUD) + clics del menú arreglados
 

@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 22
-        versionName "4.3"
+        versionCode 23
+        versionName "4.4"
     }
 
     signingConfigs {

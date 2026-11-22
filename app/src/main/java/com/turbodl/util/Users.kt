@@ -3,6 +3,7 @@ package com.turbodl.util
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import android.webkit.CookieManager
 import android.webkit.WebView
 import java.io.File
 
@@ -19,25 +20,33 @@ import java.io.File
  * El usuario "main" (predeterminado) no usa sufijo: es el comportamiento
  * clásico y su directorio de datos no cambia.
  *
- * 4.2: el sufijo ahora se aplica de forma idempotente y robusta. Antes
- * se llamaba a `WebView.setDataDirectorySuffix` en cada `App.onCreate`
- * envuelto en `catch (e: Exception)`: en Android 9+ la API lanza
- * `IllegalStateException` (subclase de RuntimeException, sí atrapado) la
- * SEGUNDA vez que se fija el sufijo en el mismo proceso, o si ya existe
- * un WebView vivo. Como `restartApp` a veces no mata el proceso a
- * tiempo y Android re-entra por `App.onCreate` con un sufijo distinto,
- * la segunda llamada lanzaba y dejaba el sandbox inconsistente. Ahora:
- *  - Se atrapa `Throwable` (cubre también `Error`).
- *  - Se registra el sufijo ya aplicado en una variable estática; si
- *    coincide con el que se quiere aplicar, se omite la llamada (caso
- *    normal de re-entrada tras `restartApp` que no mató el proceso).
- *  - Si el sufijo ya aplicado NO coincide con el activo, se deja el
- *    anterior (no se puede cambiar en caliente) y se registra en log;
- *    la app sigue funcionando con el sandbox anterior, sin crash.
+ * 4.2: el sufijo se aplica de forma idempotente y robusta.
+ *
+ * 4.4: dos arreglos clave para que el cambio de usuario sea REAL —
+ *   · restartApp era frágil: hacía killProcess(myPid()) tras sleep(120).
+ *     Android suele REUSAR el proceso (el kernel lo recicla), así que
+ *     App.onCreate se volvía a correr en el mismo proceso y
+ *     applyDataDirSuffix veía appliedSuffix != null y DEJABA el sufijo
+ *     anterior → el WebView seguía con la sesión del usuario previo
+ *     aunque SP dijera que el activo era el nuevo. El usuario lo
+ *     percibía como "solo me dice un mensaje, no cambia nada".
+ *     Ahora restartApp programa un relanzamiento con AlarmManager (1s
+ *     de margen) y luego System.exit(0), que termina el proceso JVM de
+ *     forma que Android NO puede reusar la instancia de Application: el
+ *     siguiente arranque crea un proceso nuevo y applyDataDirSuffix
+ *     fija el sufijo del nuevo usuario correctamente.
+ *   · Antes de cambiar, flushCookies() vuelca CookieManager/WebStorage
+ *     a disco para que la sesión del usuario saliente quede persistida
+ *     y no se pierda.
+ *
+ * 4.4: la clase U ahora lleva un `email` (identificador visible, como
+ * en lfbrowser) además del `name` (etiqueta libre). Se persiste en el
+ * JSON con key "e" (backward-compatible: usuarios viejos sin email se
+ * muestran con name como fallback).
  */
 object Users {
 
-    class U(val id: String, val name: String)
+    class U(val id: String, val name: String, val email: String = "")
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
 
@@ -49,7 +58,8 @@ object Users {
                 val o = arr.optJSONObject(i) ?: continue
                 val id = o.optString("id", "")
                 val n = o.optString("n", "")
-                if (id.isNotEmpty() && id != "main") out.add(U(id, n.ifEmpty { id }))
+                val e = o.optString("e", "")
+                if (id.isNotEmpty() && id != "main") out.add(U(id, n.ifEmpty { id }, e))
             }
         } catch (e: Exception) { }
         return out
@@ -57,32 +67,37 @@ object Users {
 
     fun save(ctx: Context, list: List<U>) {
         val arr = JSONArray()
-        list.forEach { arr.put(JSONObject().put("id", it.id).put("n", it.name)) }
+        list.forEach { arr.put(JSONObject().put("id", it.id).put("n", it.name).put("e", it.email)) }
         sp(ctx).edit().putString("users", arr.toString()).apply()
     }
 
-    fun add(ctx: Context, name: String): U {
-        val u = U("u" + (System.currentTimeMillis() % 100000000L), name)
+    fun add(ctx: Context, name: String, email: String = ""): U {
+        val u = U("u" + (System.currentTimeMillis() % 100000000L), name, email)
         val l = list(ctx)
         l.add(u)
         save(ctx, l)
         return u
     }
 
-    /**
-     * Cambia el nombre visible de un usuario (4.2: completa el CRUD —
-     * antes solo se podía crear y eliminar, no renombrar). No toca el id
-     * ni los datos del sandbox: el id sigue siendo la clave de todos los
-     * almacenamientos (history/creds/SharedPrefs/webview dir).
-     */
-    fun rename(ctx: Context, id: String, newName: String) {
+    /** Actualiza email y/o nombre de un usuario existente (4.4). */
+    fun update(ctx: Context, id: String, name: String? = null, email: String? = null) {
         if (id == "main") return
         val l = list(ctx)
         val i = l.indexOfFirst { it.id == id }
         if (i < 0) return
-        l[i] = U(id, newName.trim().ifEmpty { id })
+        val cur = l[i]
+        l[i] = U(id,
+            name?.let { it.trim().ifEmpty { id } } ?: cur.name,
+            email?.let { it.trim() } ?: cur.email)
         save(ctx, l)
     }
+
+    /**
+     * Cambia el nombre visible de un usuario (4.2). No toca el id ni los
+     * datos del sandbox: el id sigue siendo la clave de todos los
+     * almacenamientos. 4.4: delega en update() para conservar el email.
+     */
+    fun rename(ctx: Context, id: String, newName: String) = update(ctx, id, name = newName)
 
     /**
      * Elimina un usuario Y borra todos sus datos del sandbox (4.2).
@@ -90,14 +105,9 @@ object Users {
      * (cookies, credenciales, historial, marcadores, accesos) quedaban
      * huérfanos en disco. Ahora se borra:
      *  - Directorio WebView del sandbox (app_webview/usr_$id/).
-     *  - Filas de history con user=? en turbodl.db (lo hace el llamador
-     *    a través de Db.clearHistory(id); aquí no accedemos a la BD
-     *    para no crear dependencia circular).
+     *  - Filas de history con user=? en turbodl.db (lo hace el llamador).
      *  - Filas de creds con user=? en turbodl.db (igual).
      *  - SharedPrefs bookmarks_$id, history_$id, sitesP{0,1,2}_$id.
-     * El limpiado de DB lo hace el llamador (BrowserActivity) que ya
-     * tiene la instancia de Engine/Db; aquí solo borramos archivos y
-     * prefs, que son las fugas que el código antiguo dejaba.
      */
     fun remove(ctx: Context, id: String) {
         if (id == "main") return
@@ -123,12 +133,9 @@ object Users {
     fun wipeSandbox(ctx: Context, id: String) {
         if (id == "main") return
         val suffix = "usr_$id"
-        // app_webview/ es el dir por defecto del WebView; el sufijo crea
-        // un subdirectorio con ese nombre dentro de él.
         val webviewBase = File(ctx.dataDir, "app_webview")
         val target = File(webviewBase, suffix)
         if (target.exists()) target.deleteRecursively()
-        // Algunas ROMs usan <dataDir>/app_<sufijo>_webview/; por si acaso.
         val alt = File(ctx.dataDir, "app_${suffix}_webview")
         if (alt.exists()) alt.deleteRecursively()
     }
@@ -141,6 +148,12 @@ object Users {
 
     fun nameOf(ctx: Context, id: String): String =
         if (id == "main") "Principal" else list(ctx).firstOrNull { it.id == id }?.name ?: id
+
+    /** Identificador visible del usuario: email si lo tiene, si no el
+     *  nombre, si no el id (4.4, estilo lfbrowser que muestra el correo). */
+    fun displayOf(ctx: Context, id: String): String =
+        if (id == "main") "Principal"
+        else list(ctx).firstOrNull { it.id == id }?.let { it.email.ifEmpty { it.name.ifEmpty { it.id } } } ?: id
 
     /** Sufijo de directorio de datos del WebView ya aplicado en este
      *  proceso (o null si aún no se ha fijado ninguno). Es estático al
@@ -157,8 +170,6 @@ object Users {
         // Ya aplicado y coincide: nada que hacer (re-entrada normal).
         if (appliedSuffix == want) return
         // Ya aplicado pero distinto: no se puede cambiar en caliente.
-        // Mantenemos el anterior y la app sigue con ese sandbox. No
-        // lanzamos: el usuario debe reiniciar (lo hace restartApp).
         if (appliedSuffix != null) {
             android.util.Log.w("TurboDL.Users",
                 "setDataDirectorySuffix ya fijado a '$appliedSuffix', no se " +
@@ -173,32 +184,75 @@ object Users {
         } catch (e: Throwable) {
             android.util.Log.w("TurboDL.Users",
                 "setDataDirectorySuffix('$want') falló: ${e.javaClass.simpleName}: ${e.message}")
-            // No marcamos appliedSuffix: si la siguiente llamada quiere
-            // el mismo sufijo lo reintentará; si quiere otro, también.
-            // La app sigue con el dir por defecto (sandbox 'main').
         }
     }
 
     /**
+     * Vuelca cookies y WebStorage a disco (4.4). Llamar ANTES de cambiar
+     * de usuario para que la sesión del usuario saliente quede
+     * persistida en su sandbox y no se pierda al reciclar el proceso.
+     * Es un best-effort: si falla, no interrumpe el cambio.
+     */
+    fun flushCookies() {
+        // CookieManager.flush() vuelca las cookies a disco; WebStorage
+        // no tiene flush() público (se persiste por el WebView). Con esto
+        // la sesión del usuario saliente queda guardada en su sandbox.
+        try { CookieManager.getInstance().flush() } catch (e: Throwable) { }
+    }
+
+    /**
      * Reinicia la aplicación para montar la sandbox del usuario activo.
-     * Termina todas las actividades y relanza la actividad principal;
-     * el proceso se recicla y App.onCreate vuelve a aplicar el sufijo.
-     * 4.2: si getLaunchIntentForPackage devuelve null (caso raro),
-     * no matamos el proceso sin relanzar — terminamos solo las
-     * actividades y dejamos que el usuario vuelva a abrir la app.
+     *
+     * 4.4 (arregla el bug de "solo me dice un mensaje"): antes hacía
+     * killProcess(myPid()) tras sleep(120). Android suele REUSAR el
+     * proceso reciclado, así que App.onCreate se volvía a correr en el
+     * mismo proceso y applyDataDirSuffix veía appliedSuffix != null y
+     * DEJABA el sufijo anterior → el WebView seguía con la sesión del
+     * usuario previo aunque SP dijera que el activo era el nuevo.
+     *
+     * Ahora:
+     *   1. Programa con AlarmManager un relanzamiento del launcher
+     *      intent dentro de ~1 segundo (RTC_WAKEUP). AlarmManager
+     *      entrega el intent tras el System.exit, en un proceso NUEVO.
+     *   2. Llama a System.exit(0). A diferencia de killProcess, exit
+     *      termina la VM de forma que Android NO puede reusar la
+     *      instancia de Application: el siguiente onCreate crea un
+     *      proceso nuevo y el sufijo se fija para el nuevo usuario.
+     *
+     * Si packageManager devuelve null (caso muy raro), no matamos: solo
+     * cerramos las actividades para que el usuario reabra la app.
      */
     fun restartApp(ctx: Context) {
-        val i = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
-        if (i != null) {
-            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+        flushCookies()
+        val pi = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
+        if (pi != null) {
+            pi.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            try { ctx.startActivity(i) } catch (e: Exception) { }
-            // pequeña pausa para que el nuevo task se agende antes de matar
-            try { Thread.sleep(120) } catch (e: InterruptedException) { }
-            android.os.Process.killProcess(android.os.Process.myPid())
+            // Programar el relanzamiento para dentro de 1s. Usamos
+            // AlarmManager con RTC_WAKEUP para que dispare aunque el
+            // proceso ya haya muerto. PendingIntent.getBroadcast sería
+            // más fiable pero requiere un receptor declarado; en su
+            // lugar usamos getActivity que arranca directamente la
+            // actividad launcher tras el delay.
+            try {
+                val am = ctx.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                val triggerAt = System.currentTimeMillis() + 1000L
+                val pending = android.app.PendingIntent.getActivity(
+                    ctx, 0, pi,
+                    android.app.PendingIntent.FLAG_IMMUTABLE or
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+                am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pending)
+            } catch (e: Throwable) {
+                android.util.Log.w("TurboDL.Users",
+                    "AlarmManager falló, intentando arranque inmediato: ${e.message}")
+                try { ctx.startActivity(pi) } catch (e2: Throwable) { }
+            }
+            // System.exit(0) termina la VM de forma limpia; Android no
+            // puede reusar el proceso: el siguiente onCreate crea un
+            // proceso nuevo y applyDataDirSuffix fija el sufijo nuevo.
+            try { Thread.sleep(50) } catch (e: InterruptedException) { }
+            kotlin.system.exitProcess(0)
         } else {
-            // fallback: no podemos relanzar, pero al menos sacamos al
-            // usuario de la Activity actual para que reabra la app.
             try {
                 val am = ctx.getSystemService(Context.ACTIVITY_SERVICE)
                     as android.app.ActivityManager
