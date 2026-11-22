@@ -1,3 +1,81 @@
+# TurboDL 4.7 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Barra del navegador con título de página, selección total al editar y URL a pantalla completa
+
+Pediste: *"mejores la barra de búsqueda del navegador... una vez que uno
+entre a un sitio la barra te muestre el titulo de la página no la URL,
+que cuando se toque está barra se seleccione todo el texto para o bien
+ser reemplazado rápidamente o ser copiado o cortado y otra acción
+contextual, además para urls muy largas hay un boton que lo muestra todo
+a pantalla completa"* — con capturas del navegador de referencia. La 4.7
+replica exactamente ese comportamiento.
+
+### La barra ahora tiene dos modos
+
+- **Modo reposo (navegando)**: muestra el **TÍTULO de la página** —
+  "Release TurboDL 4.6 · aldan9610/TurboDL" en vez de
+  `https://github.com/aldan9610/TurboDL/releases/tag/v4.6`. Más legible,
+  y la URL completa sigue disponible al tocar la barra o en el menú
+  long-press. Si la página no da título, muestra la URL como fallback.
+- **Modo edición (al tocar)**: la barra cambia a la **URL completa** con
+  **TODO SELECCIONADO** (highlight verde, como en tu captura):
+  - Escribir un carácter **reemplaza la URL entera** — navegación rápida
+    como Chrome/Firefox.
+  - La selección activa el **menú contextual nativo** del EditText:
+    cortar, copiar, compartir, pegar — la "otra acción contextual" que
+    pediste, sin pulsaciones largas.
+  - Debajo aparece la **tarjeta de la página actual** (📄 título + URL):
+    un toque para volver a donde estabas, como en tu captura.
+- **Al perder el foco**: vuelve al modo reposo (título), descartando lo
+  tecleado si no se navegó — igual que Chrome. Si había una carga en
+  curso, muestra la URL hasta que llegue el título nuevo.
+
+### ⇱ URL a pantalla completa (para URLs larguísimas)
+
+En modo edición, cuando la URL no cabe en la barra (más de ~45
+caracteres), aparece el botón **⇱** junto a la X de limpieza. Abre un
+diálogo a ancho completo con la URL **envuelta en varias líneas y
+seleccionada** (como tu tercera captura):
+- **→ Ir** — navega a lo que quede escrito en el diálogo (también sirve
+  para editar la URL ahí mismo, cómodo con texto largo).
+- **📋 Copiar** — al portapapeles con un toque.
+- **⇲ Colapsar** — volver a la página.
+
+### Título en vivo y por pestaña
+
+- El título se actualiza en vivo vía `WebChromeClient.onReceivedTitle`
+  (páginas que lo fijan por JS / SPAs, donde llega **después** de
+  `onPageFinished`) — sin pisar al usuario si está editando la barra.
+- Al **cambiar de pestaña**, la barra muestra el título de la pestaña
+  destino (antes mostraba su URL).
+- El long-press (Compartir enlace / Copiar URL / Pegar y abrir) sigue
+  funcionando igual, y la opción **"Editar URL (sin borrar)"** ahora
+  cambia primero a modo URL antes de poner el cursor al final (antes
+  editarías el título).
+
+### Internas
+
+- versionCode 26, versionName 4.7.
+- `browser.xml`: nuevo botón `btnUrlExpand` (⇱) en la barra superior.
+- `BrowserActivity`: helpers `setBarDisplay()` / `setBarEdit(selectAll)` /
+  `restoreBarAfterEdit()` / `updateExpandBtn()` / `showCurrentPageCard()` /
+  `showFullUrl()`; `onPageFinished` y `switchTab` muestran el título;
+  `onReceivedTitle` en el `WebChromeClient` refresca en vivo; las
+  sugerencias ponen la página activa primera (con dedupe contra
+  historial/marcadores).
+- **145 tests JVM pasan** (0 fallos). Misma firma que 4.3–4.6 → se
+  actualiza sin desinstalar. Android 8.0+.
+
+### Instalación
+
+```
+adb install -r TurboDL-4.7.apk
+```
+
+---
+
 # TurboDL 4.6 — Notas de la versión
 
 Fecha: 2026-11-22

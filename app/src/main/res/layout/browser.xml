@@ -45,6 +45,19 @@
             android:textColorHint="#9E9E9E"
             android:textSize="15sp" />
 
+        <!-- 4.7: expandir la URL a pantalla completa — aparece en modo
+             edición cuando la URL no cabe en la barra (texto largo). -->
+        <Button
+            android:id="@+id/btnUrlExpand"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="36dp"
+            android:layout_height="match_parent"
+            android:contentDescription="Ver la URL completa a pantalla completa"
+            android:text="&#8689;"
+            android:textColor="#8A8A8A"
+            android:textSize="16sp"
+            android:visibility="gone" />
+
         <!-- botón X de limpieza: aparece en cuanto hay algo escrito -->
         <Button
             android:id="@+id/btnClear"

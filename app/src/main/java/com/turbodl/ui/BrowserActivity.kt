@@ -718,6 +718,8 @@ class BrowserActivity : Activity() {
                 // 4.0 U2: la X de limpieza apenas hay algo escrito
                 findViewById<Button>(R.id.btnClear).visibility =
                     if ((s?.length ?: 0) > 0) View.VISIBLE else View.GONE
+                // 4.7: botón ⇱ de URL completa solo en edición con URL larga
+                updateExpandBtn()
             }
         })
         // BUG 4 (informado por el usuario): "una vez ya realizada la búsqueda
@@ -727,27 +729,31 @@ class BrowserActivity : Activity() {
         // URL al dejar presionado sobre esa".
         //
         // Solución:
-        //  · TOQUE simple sobre la barra: si hay una URL cargada, la
-        //    seleccionamos TODA y pedimos foco + teclado. Así, al escribir,
-        //    el primer carácter sustituye la URL entera (navegación rápida).
-        //    Si el campo está vacío no hacemos nada (el foco normal basta).
+        //  · TOQUE simple sobre la barra (4.7): la barra muestra el TÍTULO de
+        //    la página en reposo; al tocar pasa a modo edición con la URL
+        //    completa seleccionada TODA (el primer carácter tecleado la
+        //    reemplaza — navegación rápida como Chrome/Firefox) y el menú
+        //    contextual nativo del EditText ofrece cortar/copiar/compartir.
+        //    Bajo la barra aparece la tarjeta de la página actual.
         //  · PULSACIÓN LARGA sobre la barra: menú contextual "Compartir
         //    enlace" / "Copiar URL" — se mantiene la posibilidad de copiar y
         //    compartir la URL actual sin necesidad de tocar el campo.
+        //  · FIN de edición (foco perdido): vuelve al modo reposo (título),
+        //    descartando lo tecleado si no se navegó — igual que Chrome.
         editUrl.setOnClickListener {
-            val currentUrl = editUrl.text?.toString() ?: ""
-            if (currentUrl.isNotEmpty()) {
-                // Selecciona todo el texto: el siguiente carácter escrito
-                // reemplaza la URL (mismo comportamiento que Chrome/Firefox).
-                editUrl.selectAll()
-                editUrl.requestFocus()
-                showKb()
-            }
+            setBarEdit()
+            showCurrentPageCard()
+        }
+        editUrl.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) restoreBarAfterEdit()
         }
         editUrl.setOnLongClickListener {
             showUrlContextMenu()
             true
         }
+        // 4.7: ⇱ — la URL completa a pantalla completa (URLs larguísimas que
+        // no caben en la barra, ni siquiera con scroll)
+        findViewById<Button>(R.id.btnUrlExpand).setOnClickListener { showFullUrl() }
         setupHistoryBar()
 
         // 4.2.3: eliminado el buscador grande de la página de inicio
@@ -1253,6 +1259,140 @@ class BrowserActivity : Activity() {
      * ocultamos sugerencias y bajamos el teclado (las sugerencias no deben
      * tapar la página que se va a cargar).
      */
+    // ---------------- barra superior: título en reposo, URL al editar (4.7) ----------------
+
+    /**
+     * 4.7 — dos modos para la barra, replicando el navegador de referencia:
+     *   · REPOSO — muestra el TÍTULO de la página activa (más legible que la
+     *     URL, que suele ser inmensa); si no hay título, la URL.
+     *   · EDICIÓN — al tocar, muestra la URL completa con TODO SELECCIONADO:
+     *     el primer carácter tecleado la reemplaza (navegación rápida) y el
+     *     menú contextual nativo del EditText ofrece cortar/copiar/compartir.
+     * Al perder el foco se vuelve al modo reposo, descartando lo tecleado
+     * sin navegar — igual que Chrome.
+     */
+
+    /** Texto de reposo para la pestaña [t]: título si hay, si no URL. */
+    private fun barDisplayText(t: Tab?): String =
+        t?.title?.takeIf { it.isNotBlank() } ?: t?.url ?: ""
+
+    /** Pone la barra en modo reposo (título de la pestaña activa). */
+    private fun setBarDisplay() {
+        suppressSuggest = true
+        editUrl.setText(barDisplayText(tabs.getOrNull(cur)))
+        suppressSuggest = false
+        findViewById<Button>(R.id.btnClear).visibility = View.GONE
+        findViewById<Button>(R.id.btnUrlExpand).visibility = View.GONE
+        hideSuggestions()
+    }
+
+    /** Fin de edición (foco perdido): si hay una carga en curso mostramos
+     *  la URL (el título aún sería el de la página anterior); si no, título. */
+    private fun restoreBarAfterEdit() {
+        if (prog.visibility == View.VISIBLE) {
+            suppressSuggest = true
+            editUrl.setText(tabs.getOrNull(cur)?.url ?: "")
+            suppressSuggest = false
+            findViewById<Button>(R.id.btnClear).visibility =
+                if (editUrl.text?.isNotEmpty() == true) View.VISIBLE else View.GONE
+            findViewById<Button>(R.id.btnUrlExpand).visibility = View.GONE
+            hideSuggestions()
+        } else setBarDisplay()
+    }
+
+    /** Pone la barra en modo edición: URL completa + teclado.
+     *  @param selectAll true → selección total (reemplazo rápido);
+     *         false → cursor al final (edición quirúrgica, menú long-press). */
+    private fun setBarEdit(selectAll: Boolean = true) {
+        val url = tabs.getOrNull(cur)?.url ?: ""
+        suppressSuggest = true
+        editUrl.setText(url)
+        editUrl.hint = "Página de inicio"
+        suppressSuggest = false
+        editUrl.requestFocus()
+        if (selectAll) editUrl.post { editUrl.selectAll() }
+        else editUrl.setSelection(editUrl.text.length)
+        showKb()
+        updateExpandBtn()
+    }
+
+    /** Botón ⇱ de URL completa: solo mientras se edita y cuando la URL no
+     *  cabe en la barra (más de ~45 caracteres a 15sp). */
+    private fun updateExpandBtn() {
+        val b = findViewById<Button>(R.id.btnUrlExpand)
+        b.visibility =
+            if (editUrl.hasFocus() && (editUrl.text?.length ?: 0) > 45) View.VISIBLE
+            else View.GONE
+    }
+
+    /** Tarjeta "página actual" bajo la barra al entrar en edición (4.7):
+     *  título + URL de donde estás — un toque para volver. Es la primera
+     *  fila que ve el usuario, como en el navegador de referencia. */
+    private fun showCurrentPageCard() {
+        val t = tabs.getOrNull(cur) ?: return
+        if (t.url.isEmpty()) return
+        val rows = ArrayList<Sugg>()
+        rows.add(Sugg("📄", (t.title.ifEmpty { MediaProbe.hostOf(t.url) }).take(70), t.url))
+        suggestionsList.adapter = object : BaseAdapter() {
+            override fun getCount(): Int = rows.size
+            override fun getItem(p: Int): Sugg = rows[p]
+            override fun getItemId(p: Int): Long = p.toLong()
+            override fun getView(p: Int, cv: View?, parent: ViewGroup?): View =
+                suggestionRow(getItem(p))
+        }
+        val lp = suggestionsList.layoutParams
+        lp.height = Math.min(dp(52) * rows.size + dp(12), dp(420))
+        suggestionsList.layoutParams = lp
+        suggestionsHost.visibility = View.VISIBLE
+    }
+
+    /** 4.7: la URL completa a pantalla completa — para URLs larguísimas que
+     *  ni siquiera en la barra expandida se leen bien. Texto seleccionado
+     *  (menú contextual nativo para copiar/cortar/compartir), editable, con
+     *  ⇲ colapsar y → para navegar a lo que quede escrito. */
+    private fun showFullUrl() {
+        val url = editUrl.text?.toString() ?: return
+        if (url.isEmpty()) return
+        val et = android.widget.EditText(this)
+        et.setText(url)
+        et.textSize = 16f
+        et.setSingleLine(false)
+        et.setPadding(dp(12), dp(8), dp(12), dp(8))
+        et.minLines = 2
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("URL completa")
+            .setView(et)
+            .setPositiveButton("→ Ir") { _, _ ->
+                // navega a lo que quede escrito (permite editar la URL aquí)
+                val edited = et.text?.toString()?.trim().takeUnless { it.isNullOrEmpty() }
+                    ?: url
+                editUrl.setText(edited)
+                go()
+            }
+            .setNeutralButton("📋 Copiar") { _, _ ->
+                try {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("url", url))
+                    toast("URL copiada")
+                } catch (e: Exception) { }
+            }
+            .setNegativeButton("⇲ Colapsar", null)
+            .show()
+        dlg.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT)
+        et.post {
+            et.requestFocus()
+            et.selectAll()
+            try {
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as InputMethodManager
+                imm.hideSoftInputFromWindow(et.windowToken, 0)
+            } catch (e: Exception) { }
+        }
+    }
+
     private fun go(): Boolean {
         val query = editUrl.text.toString().trim()
         if (query.isEmpty()) return true
@@ -1670,7 +1810,9 @@ class BrowserActivity : Activity() {
             cur = index
         }
         attach(tabs[index])
-        editUrl.setText(tabs[index].url)
+        // 4.7: la barra en modo reposo muestra el título de la pestaña
+        // destino (si lo tiene; si no, su URL).
+        setBarDisplay()
         renderStrip()
         persistTabs()
         updateTabButton()
@@ -2836,9 +2978,14 @@ class BrowserActivity : Activity() {
                     // la URL final; ocultamos sugerencias para que no tapen
                     // la página recién cargada.
                     suppressSuggest = true
-                    editUrl.setText(url)
+                    // 4.7: la barra muestra el TÍTULO de la página en reposo
+                    // (más legible que la URL); si el WebView aún no lo
+                    // tiene, la URL como fallback (onReceivedTitle lo
+                    // refrescará cuando llegue).
+                    editUrl.setText(t.title.ifBlank { url })
                     suppressSuggest = false
                     hideSuggestions()
+                    findViewById<Button>(R.id.btnUrlExpand).visibility = View.GONE
                 }
             }
             // 4.0: credenciales — errores JS a consola + detección de formularios
@@ -2975,6 +3122,22 @@ class BrowserActivity : Activity() {
                     if (newProgress in 1..99) "✕" else "⟳"
             }
             if (newProgress >= 90) injectOn(view)
+        }
+
+        /** 4.7: el título de la página llega vía WebChromeClient (no
+         *  WebViewClient) y puede llegar después de onPageFinished (páginas
+         *  que lo fijan por JS, SPAs). Actualizamos el título de la pestaña
+         *  y la barra en modo reposo — sin pisar al usuario si está
+         *  editando la barra o hay una nueva carga en curso. */
+        override fun onReceivedTitle(view: WebView?, title: String?) {
+            val t = tabOf(view) ?: return
+            val changed = !title.isNullOrBlank() && title != t.title
+            if (!title.isNullOrBlank()) t.title = title
+            if (changed && view === activeWv() && !editUrl.hasFocus()
+                && prog.visibility != View.VISIBLE) {
+                setBarDisplay()
+            }
+            if (changed) { updateTabButton(); renderStrip() }
         }
 
         /** 4.0 F6: consola de JavaScript estilo DevTools (nativa del WebView). */
@@ -3832,9 +3995,11 @@ class BrowserActivity : Activity() {
                     // Editar URL: sitúa el cursor al final sin seleccionar
                     // todo, para corregir un carácter concreto.
                     3 -> {
-                        editUrl.requestFocus()
-                        editUrl.setSelection(editUrl.text.length)
-                        showKb()
+                        // 4.7: la barra muestra el TÍTULO en reposo; pasar
+                        // primero a modo edición (URL) antes de poner el
+                        // cursor al final, si no editaríamos el título.
+                        setBarEdit(selectAll = false)
+                        hideSuggestions()
                     }
                 }
             }
@@ -3934,6 +4099,15 @@ class BrowserActivity : Activity() {
                     rows.add(Sugg("🔎", h, Profiles.engineUrl(eng.sp, h)))
             }
         } catch (e: Exception) { }
+        // 4.7: la página activa SIEMPRE primera mientras se edita la barra —
+        // un toque para volver a donde estabas. Si la URL activa ya salía
+        // del historial/marcadores se deduplica (evita verla dos veces).
+        val at = tabs.getOrNull(cur)
+        if (at != null && at.url.isNotEmpty()) {
+            rows.removeAll { it.url == at.url }
+            rows.add(0, Sugg("📄",
+                (at.title.ifEmpty { MediaProbe.hostOf(at.url) }).take(70), at.url))
+        }
         if (rows.isEmpty()) { hideSuggestions(); return }
         val ad = object : BaseAdapter() {
             override fun getCount(): Int = rows.size

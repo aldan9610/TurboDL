@@ -1,10 +1,35 @@
-# TurboDL 4.6
+# TurboDL 4.7
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.7 — barra del navegador: título de página, selección total al editar y URL a pantalla completa
+
+La barra superior ahora se comporta como el navegador de referencia que
+enviaste en capturas:
+
+- **Título, no URL**: navegando, la barra muestra el **título de la
+  página** ("Release TurboDL 4.6 · aldan9610/TurboDL") en vez de la URL.
+  Si la página no da título, muestra la URL.
+- **Tocar = URL seleccionada entera**: al tocar, la barra pasa a la URL
+  completa con **todo seleccionado** — escribir un carácter la reemplaza
+  (navegación rápida), y el menú contextual nativo ofrece cortar/copiar/
+  compartir/pegar. Debajo queda la **tarjeta de la página actual** (📄
+  título + URL) para volver con un toque.
+- **⇱ URL a pantalla completa**: en edición con URLs largas aparece el
+  botón ⇱: la URL envuelta en varias líneas y seleccionada, con
+  **→ Ir**, **📋 Copiar** y **⇲ Colapsar**.
+- **Título en vivo**: `onReceivedTitle` (WebChromeClient) refresca la
+  barra cuando el título llega tarde (SPAs); al cambiar de pestaña se
+  muestra el título de la pestaña destino.
+
+versionCode 26, versionName 4.7. **145 tests JVM pasan** (0 fallos).
+Misma firma que 4.3–4.6.
+
+---
 
 ## Novedades de la 4.6 — bóveda de credenciales estilo KeePassXC + códigos OTP para 2FA
 
