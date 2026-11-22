@@ -1,0 +1,107 @@
+# Backup espejo a Codeberg (https://codeberg.org/seguridad-social/TurboDL)
+# Según Codeberg (Recommendations/Mirror_to_Codeberg) los pull-mirrors entrantes
+# ya no son la vía recomendada; usamos GitHub Actions con dos fases:
+#   1. sync-git: empuja branches y tags con git (espejo exacto, --force --prune).
+#   2. sync-releases: copia el release publicado con sus assets vía API de Forgejo
+#      (git solo replica tags; los releases con APKs hay que crearlos por API).
+# Secret requerido: CODEBERG_TOKEN (token de Codeberg con scope write:repository).
+
+name: Backup a Codeberg
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["**"]
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: "23 */6 * * *"   # refresco periódico de seguridad
+  workflow_dispatch:
+
+concurrency:
+  group: codeberg-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CODEBERG_REPO: seguridad-social/TurboDL
+
+jobs:
+  sync-git:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # historia completa de todas las branches
+          persist-credentials: false
+
+      - name: Empujar branches y tags a Codeberg
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+        run: |
+          git remote add codeberg "https://oauth2:${CODEBERG_TOKEN}@codeberg.org/${CODEBERG_REPO}.git"
+          git update-ref -d refs/remotes/origin/HEAD 2>/dev/null || true
+          git fetch origin --tags --force --prune
+          # Espejo exacto: branches remotos -> heads, tags -> tags,
+          # y poda de branches/tags borrados en GitHub.
+          git push --force --prune codeberg \
+            "+refs/remotes/origin/*:refs/heads/*" \
+            "+refs/tags/*:refs/tags/*"
+
+  sync-releases:
+    if: github.event_name == 'release'
+    needs: sync-git            # el tag ya existe en Codeberg antes de crear el release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Copiar release con assets a Codeberg
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_API: https://api.github.com/repos/${{ github.repository }}
+          CB_API: https://codeberg.org/api/v1/repos/${{ env.CODEBERG_REPO }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$GH_API/releases/tags/$TAG" -o /tmp/gh_rel.json
+          NAME=$(jq -r '.name // .tag_name' /tmp/gh_rel.json)
+          BODY=$(jq -r '.body // ""' /tmp/gh_rel.json)
+          PRE=$(jq -r '.prerelease' /tmp/gh_rel.json)
+
+          # ¿existe ya el release en Codeberg?
+          HTTP=$(curl -sS -o /tmp/cb_rel.json -w '%{http_code}' \
+            -H "Authorization: token $CODEBERG_TOKEN" "$CB_API/releases/tags/$TAG")
+          if [ "$HTTP" = "200" ]; then
+            CB_ID=$(jq -r '.id' /tmp/cb_rel.json)
+            echo "Release $TAG ya existe (id $CB_ID): actualizando nombre/descripción"
+            jq -n --arg n "$NAME" --arg b "$BODY" '{name:$n,body:$b}' > /tmp/payload.json
+            curl -sS -X PATCH -H "Authorization: token $CODEBERG_TOKEN" \
+              -H "Content-Type: application/json" -d @/tmp/payload.json \
+              "$CB_API/releases/$CB_ID" -o /tmp/cb_rel.json
+          else
+            echo "Creando release $TAG en Codeberg"
+            jq -n --arg t "$TAG" --arg n "$NAME" --arg b "$BODY" --argjson p "$PRE" \
+              '{tag_name:$t,name:$n,body:$b,draft:false,prerelease:$p}' > /tmp/payload.json
+            curl -sS -H "Authorization: token $CODEBERG_TOKEN" \
+              -H "Content-Type: application/json" -d @/tmp/payload.json \
+              "$CB_API/releases" -o /tmp/cb_rel.json
+            CB_ID=$(jq -r '.id' /tmp/cb_rel.json)
+          fi
+
+          # assets: subir solo los que falten (aditivo, nunca borra)
+          jq -c '.assets[]' /tmp/gh_rel.json | while read -r a; do
+            FNAME=$(jq -r '.name' <<<"$a")
+            DL=$(jq -r '.browser_download_url' <<<"$a")
+            if jq -e --arg n "$FNAME" '.assets[]? | select(.name == $n)' /tmp/cb_rel.json >/dev/null 2>&1; then
+              echo "Asset $FNAME ya presente en Codeberg"; continue
+            fi
+            echo "Subiendo asset $FNAME ($DL)"
+            curl -sSL -o "/tmp/$FNAME" "$DL"
+            curl -sS -H "Authorization: token $CODEBERG_TOKEN" \
+              -F "attachment=@/tmp/$FNAME" \
+              "$CB_API/releases/$CB_ID/assets?name=$FNAME" -o /tmp/upload.json
+            jq -r '"  -> " + (.name // .message)' /tmp/upload.json
+            rm -f "/tmp/$FNAME"
+          done
