@@ -1,3 +1,64 @@
+# TurboDL 4.8 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Caché HTTP con ETag: menos datos al recargar
+
+Pediste: *"navegador con caché con etag u otra alternativa para
+disminuir el consumo de datos y que al recargar la página no se
+descargue todo de nuevo"*. La 4.8 añade un interceptor de caché HTTP
+propio en el `shouldInterceptRequest` del WebView que guarda los
+recursos y los revalida con el servidor antes de volver a bajarlos.
+
+### Cómo ahorra datos
+
+Cada recurso GET del navegador pasa por el caché:
+
+- **Recurso fresco** (dentro de su `max-age`): se sirve desde disco
+  **sin ir a la red**. Ahorro total: 0 bytes transferidos.
+- **Recurso vencido**: se revalida enviando `If-None-Match: <ETag>` y
+  `If-Modified-Since: <fecha>`. Si el servidor responde
+  **304 Not Modified**, se entrega el caché sin descargar el cuerpo
+  (solo ~300 bytes de headers vs. los MB que pesa una página entera).
+- **Sin red** (excepción de conexión): sirve el caché stale como
+  paliativo en modo offline, en vez de mostrar error.
+
+El frame principal también se cachea — es lo que más pesa y lo que
+más cambia entre recargas, así que es donde más se nota. El bloqueador
+de anuncios sigue corriendo, pero solo sobre recursos no cacheados.
+
+### Respeto a las cabeceras del servidor
+
+- `Cache-Control: no-store` / `no-cache` y `Pragma: no-cache` → no se
+  cachea (páginas sensibles, banca, login).
+- Se guardan ETag, Last-Modified, max-age y Expires de la respuesta.
+- Se reenvían las cookies del `CookieManager` del WebView (sesiones,
+  logins) y los headers del navegador (User-Agent, Accept, etc.).
+
+### Control y visibilidad
+
+En **Ajustes → Navegador** hay ahora tres filas:
+
+- **📦 Caché HTTP (ETag)** — activar/desactivar. Muestra el tamaño
+  actual del caché y los **bytes ahorrados** desde que se instaló.
+- **🧹 Vaciar caché HTTP** — borra el caché del usuario activo.
+
+El caché está **aislado por perfil de usuario** (cada usuario tiene
+su propio directorio bajo `dataDir/httpcache/usr_<id>/`) y tiene un
+límite de 80 MB con expulsión LRU, así que no crece sin control.
+
+### Notas técnicas
+
+- Implementado en `util/HttpCache.kt` con `HttpURLConnection` (sin
+  añadir OkHttp ni dependencias externas — coherente con el resto
+  del app, que es Kotlin puro). Clave de entrada = SHA-1 de la URL.
+- Range (vídeo/streaming) y métodos no GET se ignoran: los maneja
+  el WebView nativamente, que ya tiene su caché de medios.
+- Se fuerza `Accept-Encoding: identity` para guardar el cuerpo final
+  (sin gzip): el ahorro real viene del 304, no de la compresión.
+
+---
+
 # TurboDL 4.7 — Notas de la versión
 
 Fecha: 2026-11-22

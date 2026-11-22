@@ -53,6 +53,7 @@ import com.turbodl.engine.MediaProbe
 import com.turbodl.model.Kind
 import com.turbodl.util.Kit
 import com.turbodl.util.Favicons
+import com.turbodl.util.HttpCache
 import com.turbodl.util.Profiles
 import com.turbodl.util.Users
 import com.turbodl.util.Ui
@@ -3059,6 +3060,19 @@ class BrowserActivity : Activity() {
             if (MEDIA_RE.containsMatchIn(u) || DETECT_RE.containsMatchIn(u))
                 addDetected(Kit.normalizeSniffUrl(u), "req",
                     tabUid = tabOf(view)?.uid ?: currentTab()?.uid ?: -1)
+            // 4.8: caché HTTP con ETag/Last-Modified. Se activa por
+            // toggle (on por defecto) y sirve el caché fresco o
+            // revalida con If-None-Match → 304 (sin bajar el cuerpo).
+            // El frame principal TAMBIÉN se cachea: es lo que más ahorra
+            // al recargar (HTML pesa y casi nunca cambia entre cargas).
+            // Adblock corre DESPUÉS: si el recurso está cacheado y
+            // fresco, no se bloquea (ya se sirvió limpio la 1ª vez).
+            if (eng.sp.getBoolean("httpCache", true)) {
+                try {
+                    val cached = HttpCache.intercept(this@BrowserActivity, request)
+                    if (cached != null) return cached
+                } catch (e: Throwable) { }
+            }
             // bloqueador de anuncios: motor 100% Kotlin (EasyList + EasyPrivacy,
             // semantica EasyList); si aun no esta listo o fallo, cae a la
             // lista compacta de hosts que existia antes. Nunca debe lanzar:

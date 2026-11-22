@@ -76,6 +76,13 @@ class SettingsActivity : Activity() {
         row("🧹 Limpiar historial de búsqueda", "") { clearHistory() }
         row("🕘 Limpiar historial de páginas", "") { clearPageHistory() }
         row("🍪 Limpiar cookies y caché del navegador", "") { clearWeb() }
+        row("📦 Caché HTTP (ETag)",
+            if (eng.sp.getBoolean("httpCache", true)) "activado · " +
+                Kit.fmtBytes(com.turbodl.util.HttpCache.size(this)) +
+                " · ahorrados " + Kit.fmtBytes(
+                    com.turbodl.util.HttpCache.savedTotal(this))
+            else "desactivado") { toggleHttpCache() }
+        row("🧹 Vaciar caché HTTP", "") { clearHttpCache() }
 
         header("Torrents")
         row("🧩 Elegir archivos del torrent",
@@ -702,6 +709,20 @@ class SettingsActivity : Activity() {
     private fun toggleAdblock() {
         val nv = !eng.sp.getBoolean("adblock", true)
         eng.sp.edit().putBoolean("adblock", nv).apply()
+        buildUi()
+    }
+
+    /** 4.8: activar/desactivar el caché HTTP con ETag del navegador. */
+    private fun toggleHttpCache() {
+        val nv = !eng.sp.getBoolean("httpCache", true)
+        eng.sp.edit().putBoolean("httpCache", nv).apply()
+        buildUi()
+    }
+
+    /** 4.8: vaciar el caché HTTP del usuario activo. */
+    private fun clearHttpCache() {
+        val n = com.turbodl.util.HttpCache.clear(this)
+        toast("Caché HTTP vaciado (${Kit.fmtBytes(n)})")
         buildUi()
     }
 
