@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.turbodl.model.Task
 import java.util.ArrayList
 
-class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
+class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -19,6 +19,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
         )
         db.execSQL(SQL_HISTORY)
         db.execSQL(SQL_CREDS)
+        db.execSQL(SQL_VAULT)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldV: Int, newV: Int) {
@@ -28,6 +29,12 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
         if (oldV < 3) {
             try { db.execSQL("ALTER TABLE history ADD COLUMN user TEXT DEFAULT 'main'") } catch (e: Exception) { }
             try { db.execSQL(SQL_CREDS) } catch (e: Exception) { }
+        }
+        // v4 (4.6): bóveda de credenciales estilo KeePassXC + OTP (TOTP/HOTP).
+        // Las contraseñas y los secrets OTP se guardan cifrados con Secrets
+        // (AES-256-GCM, clave en AndroidKeyStore), igual que la tabla creds.
+        if (oldV < 4) {
+            try { db.execSQL(SQL_VAULT) } catch (e: Exception) { }
         }
     }
 
@@ -44,6 +51,25 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "user TEXT, host TEXT, username TEXT, secret TEXT," +
             "never INTEGER DEFAULT 0, time INTEGER)"
+
+        // 4.6: bóveda de credenciales estilo KeePassXC con OTP.
+        //   user     — sandbox de usuario (igual que creds/history).
+        //   title    — nombre de la entrada ("Gmail", "GitHub"...).
+        //   username — usuario/email para autenticarse.
+        //   password — contraseña cifrada con Secrets (vacía si no aplica).
+        //   url      — sitio web asociado (opcional).
+        //   otpcfg   — config OTP serializada por Otp.Cfg.encode() (vacío si
+        //              la entrada no tiene 2FA). Ej: "totp|SHA1|6|30|0|0".
+        //   otpkey   — secret OTP cifrado con Secrets (Base32/hex/plain antes
+        //              de cifrar). Vacío si no hay OTP.
+        //   notes    — notas libres (texto plano; para secret sensible
+        //              conviene usar el campo password).
+        //   time     — timestamp de creación/edición.
+        private const val SQL_VAULT =
+            "CREATE TABLE vault(" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "user TEXT, title TEXT, username TEXT, password TEXT," +
+            "url TEXT, otpcfg TEXT, otpkey TEXT, notes TEXT, time INTEGER)"
     }
 
     private fun cv(t: Task): ContentValues {
@@ -263,5 +289,105 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 3) {
             "SELECT never FROM creds WHERE user=? AND host=? LIMIT 1", arrayOf(user, host))
         c.use { if (it.moveToFirst()) return it.getInt(0) != 0 }
         return false
+    }
+
+    // ---------------- bóveda (4.6) ----------------
+
+    /** Entrada de la bóveda. password/otpkey vienen CIFRADOS con Secrets
+     *  desde la BD; la UI los descifra bajo demanda (nunca en la lista). */
+    class VaultRow(
+        val id: Long, val user: String, val title: String, val username: String,
+        val passwordEnc: String, val url: String,
+        val otpCfgEnc: String,  // serialización Otp.Cfg.encode(), SIN cifrar (no es secreto)
+        val otpKeyEnc: String,  // secret OTP CIFRADO con Secrets
+        val notes: String, val time: Long
+    ) {
+        /** ¿Tiene OTP configurado (otpcfg y otpkey no vacíos)? */
+        fun hasOtp(): Boolean = otpCfgEnc.isNotBlank() && otpKeyEnc.isNotBlank()
+    }
+
+    /** Inserta o reemplaza una entrada de la bóveda. Si id==0 inserta;
+     *  si id>0 actualiza. Los campos password y otpKey ya deben venir
+     *  CIFrados con [com.turbodl.util.Secrets.encrypt]. */
+    @Synchronized
+    fun saveVault(id: Long, user: String, title: String, username: String,
+                  passwordEnc: String, url: String,
+                  otpCfgEnc: String, otpKeyEnc: String, notes: String): Long {
+        val v = ContentValues()
+        if (id > 0) v.put("id", id)
+        v.put("user", user); v.put("title", title); v.put("username", username)
+        v.put("password", passwordEnc); v.put("url", url)
+        v.put("otpcfg", otpCfgEnc); v.put("otpkey", otpKeyEnc)
+        v.put("notes", notes); v.put("time", System.currentTimeMillis())
+        return if (id > 0) {
+            writableDatabase.update("vault", v, "id=?", arrayOf(id.toString())).toLong()
+            id
+        } else {
+            writableDatabase.insert("vault", null, v)
+        }
+    }
+
+    /** Todas las entradas del usuario, ordenadas por título. */
+    @Synchronized
+    fun vaultAll(user: String): ArrayList<VaultRow> {
+        val out = ArrayList<VaultRow>()
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,title,username,password,url,otpcfg,otpkey,notes,time " +
+            "FROM vault WHERE user=? ORDER BY title COLLATE NOCASE",
+            arrayOf(user))
+        c.use {
+            while (it.moveToNext()) out.add(VaultRow(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "",
+                it.getString(6) ?: "", it.getString(7) ?: "", it.getString(8) ?: "",
+                it.getLong(9)
+            ))
+        }
+        return out
+    }
+
+    /** Una entrada por id. */
+    @Synchronized
+    fun vaultGet(id: Long): VaultRow? {
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,title,username,password,url,otpcfg,otpkey,notes,time " +
+            "FROM vault WHERE id=? LIMIT 1", arrayOf(id.toString()))
+        c.use {
+            if (it.moveToFirst()) return VaultRow(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "",
+                it.getString(6) ?: "", it.getString(7) ?: "", it.getString(8) ?: "",
+                it.getLong(9)
+            )
+        }
+        return null
+    }
+
+    @Synchronized
+    fun deleteVault(id: Long) {
+        writableDatabase.delete("vault", "id=?", arrayOf(id.toString()))
+    }
+
+    @Synchronized
+    fun vaultCount(user: String): Int {
+        val c = readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM vault WHERE user=?", arrayOf(user))
+        c.use { if (it.moveToFirst()) return it.getInt(0) }
+        return 0
+    }
+
+    /** Incrementa el contador HOTP de una entrada y devuelve el nuevo
+     *  valor. Solo aplica a HOTP; el guardado del nuevo contador lo hace
+     *  la UI reescribiendo otpcfg con [com.turbodl.util.Otp.Cfg.encode]. */
+    @Synchronized
+    fun vaultNextCounter(id: Long): Long {
+        val row = vaultGet(id) ?: return 0L
+        val cfg = com.turbodl.util.Otp.Cfg.parse(row.otpCfgEnc) ?: return 0L
+        val nc = cfg.counter + 1
+        val ncfg = cfg.copy(counter = nc)
+        val v = ContentValues()
+        v.put("otpcfg", ncfg.encode())
+        writableDatabase.update("vault", v, "id=?", arrayOf(id.toString()))
+        return nc
     }
 }

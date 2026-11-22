@@ -37,6 +37,13 @@
             android:layout_marginTop="8dp"
             android:text="Codificador URI / Base64" />
 
+        <Button
+            android:id="@+id/btnVault"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="🔐 Bóveda de credenciales (KeePassXC + OTP)" />
+
         <TextView
             android:id="@+id/txtAbout"
             android:layout_width="match_parent"

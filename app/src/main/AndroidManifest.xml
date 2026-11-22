@@ -161,6 +161,12 @@
             android:name=".ui.OnboardingActivity"
             android:exported="false" />
 
+        <!-- 4.6: bóveda de credenciales estilo KeePassXC + OTP -->
+        <activity
+            android:name=".ui.VaultActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <service
             android:name=".service.DownloadService"
             android:exported="false"

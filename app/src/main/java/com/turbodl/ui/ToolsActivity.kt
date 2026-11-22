@@ -32,6 +32,10 @@ class ToolsActivity : Activity() {
         findViewById<Button>(R.id.btnMerge).setOnClickListener { pickParts() }
         findViewById<Button>(R.id.btnChecksum).setOnClickListener { pickForChecksum() }
         findViewById<Button>(R.id.btnEnc).setOnClickListener { showEncoders() }
+        // 4.6: bóveda de credenciales estilo KeePassXC + OTP (TOTP/HOTP).
+        findViewById<Button>(R.id.btnVault).setOnClickListener {
+            startActivity(Intent(this, VaultActivity::class.java))
+        }
 
         findViewById<TextView>(R.id.txtAbout).text =
             "TurboDL 4.2.2 — gestor de descargas multipropósito\n\n" +

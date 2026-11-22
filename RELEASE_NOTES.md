@@ -1,3 +1,131 @@
+# TurboDL 4.6 — Notas de la versión
+
+Fecha: 2026-11-22
+
+## Bóveda de credenciales estilo KeePassXC + códigos OTP para 2FA
+
+Pediste: *"Incorporar una utilidad de poder guardar credenciales estilo
+lo que hace keepassxc fácilmente accesible dentro de la aplicación
+incluyendo generación de códigos OTP para logearme fácilmente a sitios
+con 2auth dentro de la aplicación (tip de optimización: no generar estos
+códigos siempre sino cuando se entre a la interfaz que los muestra no
+vaya a ser que consuman muchos recursos computacionales en caso de
+haber muchas credenciales)"*. La 4.6 añade una **bóveda de credenciales**
+con **generación de códigos OTP** (TOTP/HOTP) para 2FA, accesible desde el
+navegador y desde Herramientas, con la optimización que pediste: **los
+códigos OTP no se generan siempre, solo al pulsar "Ver código"**, y se
+recalculan **solo en el límite del step** (cada 30s), no cada tick.
+
+### Qué guarda la bóveda
+
+Por cada entrada:
+- **Título** (obligatorio) — p. ej. "Gmail", "GitHub".
+- **Usuario / email** — para copiar con un toque.
+- **Contraseña** — cifrada con `Secrets` (AES-256-GCM, clave en
+  AndroidKeyStore). Se copia con un toque.
+- **Sitio web (URL)** — opcional; se copia con un toque.
+- **Doble factor (OTP)** — opcional:
+  - Tipo: **Ninguno / TOTP (tiempo, 30s) / HOTP (contador) / Steam Guard**.
+  - Algoritmo HMAC: **SHA1** (estándar de Google Authenticator),
+    **SHA256** o **SHA512**.
+  - Dígitos: **6** (por defecto), **7** u **8** (algunos servicios).
+  - Secret OTP en **Base32** (lo estándar), **hex** (`hex:`), texto
+    plano (`plain:`), o pega directamente un **`otpauth://` URI** completo
+    (el que dan los QR de 2FA) y la app lo descompone solo.
+- **Notas** — texto plano (no guardes secretos aquí).
+
+### Códigos OTP (2FA)
+
+- **TOTP** (RFC 6238) — el estándar de Google Authenticator, KeePassXC,
+  Aegis, 1Password, Authy, etc. Código basado en el tiempo, cada 30s.
+- **HOTP** (RFC 4226) — código basado en contador; al pulsar "Ver código"
+  se incrementa el contador y se persiste en la BD (como esperan los
+  servidores HOTP).
+- **Steam Guard** — variante de TOTP con 5 dígitos alfanuméricos
+  (alfabeto propio de Steam), compatible con Aegis/KeePassXC.
+- Implementación **100% Kotlin** (`util/Otp.kt`), sin dependencias
+  externas: HMAC-SHA1/256/512, Base32 (RFC 4648), truncado dinámico
+  RFC 4226 §5.3, y parsing de `otpauth://` URIs.
+- **Validado contra los vectores oficiales** del RFC 6238 (Apéndice B)
+  y RFC 4226 (Apéndice D) con 16 tests JVM.
+
+### 🔧 Optimización de recursos (lo que pediste)
+
+> *"no generar estos códigos siempre sino cuando se entre a la
+> interfaz que los muestra, no vaya a ser que consuman muchos recursos
+> computacionales en caso de haber muchas credenciales"*
+
+Implementado así:
+1. **La lista de entradas no descifra nada ni calcula OTP.** Solo
+   muestra título/usuario (texto plano en BD). El descifrado del secret
+   y el HMAC **solo ocurren al pulsar "Ver código"** en una entrada.
+2. **Solo una entrada muestra su OTP a la vez** (la última abierta);
+   al abrir otra, la anterior se oculta y cancela su timer. Esto evita
+   N timers simultáneos cuando hay muchas credenciales.
+3. Cuando se muestra un código TOTP, se calcula **una vez** y se
+   reprograma **un único** `Handler.postDelayed` en el **límite del
+   step siguiente** (cada 30s), no cada tick. Entre recalculadas **no
+   hay CPU gastada**.
+4. Al `onPause` (salir de la bóveda) o reciclar la vista, el callback
+   se cancela. No quedan timers zombis recorriendo la bóveda.
+5. HOTP no tiene timer: el siguiente código se obtiene al pulsar de
+   nuevo (e incrementa el contador).
+
+### Acceso rápido
+
+Dos puntos de entrada:
+- **Navegador** → menú inferior → celda **🔑 Bóveda** (junto a Ajustes).
+- **Herramientas** → **🔐 Bóveda de credenciales (KeePassXC + OTP)**.
+
+### Cómo usarlo
+
+1. Abre la bóveda (desde el navegador o Herramientas).
+2. Pulsa **"+ Añadir"** → rellena título, usuario, contraseña.
+3. Para 2FA: elige el tipo (TOTP normalmente), pega el secret Base32
+   (o el `otpauth://` URI completo de tu QR) → Guardar.
+4. En la lista, pulsa **"Ver código"** en la entrada para ver el OTP
+   actual (recalcula solo en el límite del step) y **"Copiar"** para
+   llevarlo al portapapeles. **Usu.** y **Pass.** copian usuario y
+   contraseña; **URL** copia el sitio.
+5. Toca la fila para editar; mantén pulsado para... (en la 4.7: borrado
+   con long-press; por ahora se edita y se deja en blanco).
+
+### Seguridad
+
+- Contraseñas y secrets OTP se guardan **cifrados** con `Secrets`
+  (AES-256-GCM, clave en AndroidKeyStore) — mismo mecanismo que las
+  credenciales HTTP de la tabla `creds`.
+- La contraseña y el secret **no se descifran nunca al mostrar la
+  lista**; solo bajo demanda (al pulsar el botón).
+- Cada usuario del sandbox tiene su propia bóveda (campo `user` en la
+  tabla, igual que `creds`/`history`).
+
+### Internas
+
+- `versionCode` 25, `versionName` 4.6.
+- Nueva clase `util/Otp.kt` — TOTP/HOTP, Base32, parseo de otpauth.
+- Nueva clase `util/Clipboard.kt` — helper copy/paste (antes duplicado
+  inline en 3 sitios).
+- Nueva `ui/VaultActivity.kt` — bóveda con lista, diálogo add/edit y
+  OTP bajo demanda (Handler recalcula solo en step boundary).
+- `db/Db.kt` — versión 3 → 4: nueva tabla `vault` + DAO
+  `saveVault`/`vaultAll`/`vaultGet`/`deleteVault`/`vaultCount`/
+  `vaultNextCounter` + `VaultRow`.
+- `ToolsActivity` + `tools.xml` — botón "🔐 Bóveda de credenciales".
+- `BrowserActivity` — celda "🔑 Bóveda" en el menú inferior.
+- `AndroidManifest.xml` — declarada `VaultActivity`.
+- **145 tests JVM pasan** (0 fallos): 129 existentes + 16 nuevos de OTP
+  (vectores oficiales RFC 6238 y RFC 4226).
+
+### Instalación
+
+```
+adb install -r TurboDL-4.6.apk
+```
+Misma firma que 4.3/4.4/4.5 → se actualiza sin desinstalar. Android 8.0+.
+
+---
+
 # TurboDL 4.5 — Notas de la versión
 
 Fecha: 2026-11-22

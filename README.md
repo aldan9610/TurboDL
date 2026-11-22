@@ -1,10 +1,46 @@
-# TurboDL 4.5
+# TurboDL 4.6
 
 Gestor de descargas multipropósito para Android, escrito **100 % en código
 original Kotlin** (con pequeños analizadores Java puros para MP4/M3U/MPD y un
 motor de bloqueo de anuncios también en Kotlin, sin código nativo).
 Inspirado en la funcionalidad de FileCentipede, sin ninguna relación con sus
 autores ni su código. Gratis, sin anuncios, sin suscripciones, sin límites.
+
+## Novedades de la 4.6 — bóveda de credenciales estilo KeePassXC + códigos OTP para 2FA
+
+La 4.6 añade un **gestor de contraseñas** integrado con **generación de
+códigos OTP** (TOTP/HOTP/Steam) para autenticación de dos factores,
+accesible desde el navegador y desde Herramientas.
+
+### 🔐 Bóveda de credenciales
+- Guarda título, usuario, **contraseña cifrada** (AES-256-GCM,
+  AndroidKeyStore), URL y notas por entrada.
+- Copia usuario/contraseña/URL/OTP al portapapeles con un toque.
+- Cada usuario del sandbox tiene su propia bóveda.
+
+### 🔑 Códigos OTP (2FA)
+- **TOTP** (RFC 6238, 30s), **HOTP** (RFC 4226, contador), **Steam Guard**.
+- Algoritmos HMAC: SHA1 (estándar), SHA256, SHA512.
+- Acepta el secret en **Base32**, **hex** (`hex:`), texto plano
+  (`plain:`), o pega un **`otpauth://` URI** completo (el de los QR) y
+  la app lo descompone solo.
+- Implementación 100% Kotlin, sin dependencias. Validada contra los
+  vectores oficiales RFC 6238/4226.
+
+### ⚡ Optimización de recursos (lo que pediste)
+> *"no generar estos códigos siempre sino cuando se entre a la
+> interfaz que los muestra"*
+
+- La **lista no calcula OTP** — solo al pulsar **"Ver código"**.
+- **Solo una entrada** muestra OTP a la vez (evita N timers).
+- Recálculo **solo en el límite del step** (cada 30s), no cada tick.
+- `onPause` y reciclado de vista cancelan el timer (sin timers zombis).
+
+### 📦 Internas
+- versionCode 25, versionName 4.6. Misma firma que 4.3/4.4/4.5. **145
+  tests JVM pasan** (0 fallos): 129 + 16 nuevos de OTP (vectores RFC).
+
+---
 
 ## Novedades de la 4.5 — proxy de red para todo el tráfico (HTTP, HTTPS-proxy, SOCKS4, SOCKS5)
 

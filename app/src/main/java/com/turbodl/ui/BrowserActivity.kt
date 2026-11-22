@@ -3645,6 +3645,8 @@ class BrowserActivity : Activity() {
             MenuCell("🖥", "Escritorio", active = desktopMode) { toggleDesktop(); renderMenuPages() },
             MenuCell("🧪", "Diagnóstico") { hideSheets(); showDiagnostico() },
             MenuCell("⚙", "Ajustes") { hideSheets(); startActivity(android.content.Intent(this, SettingsActivity::class.java)) },
+            // 4.6: bóveda de credenciales (KeePassXC + OTP) accesible desde el navegador.
+            MenuCell("🔑", "Bóveda") { hideSheets(); startActivity(android.content.Intent(this, VaultActivity::class.java)) },
             // --- herramientas ---
             MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
             MenuCell("🗒", "Notas") { hideSheets(); showNotes() },
