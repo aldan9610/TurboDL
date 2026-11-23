@@ -1,3 +1,93 @@
+# TurboDL 4.12 — Notas de la versión
+
+Fecha: 2026-11-23
+
+## Rediseño completo de la bóveda de credenciales
+
+Pediste pulir la interfaz del gestor de credenciales inspirándote en
+gestores de escritorio tipo KeePassXC y en apps de 2FA tipo Google
+Authenticator (sin mencionarlos en ningún mensaje de la interfaz), con
+carpetas anidadas, vista vertical, copiado rápido y anillo de tiempo
+para el TOTP. Hecho — la bóveda se reescribió por completo manteniendo
+el estilo general de TurboDL (tarjetas redondeadas, acento naranja del
+tema claro/oscuro/AMOLED, tipografía configurable).
+
+### Carpetas anidadas (grupos dentro de grupos)
+
+- **Árbol de profundidad libre**: cada carpeta puede contener
+  subcarpetas, igual que los grupos de un gestor de contraseñas
+  clásico. Se guardan en una tabla nueva (`vault_grp`, Db v5) donde
+  cada carpeta apunta a su padre; la migración es automática y las
+  entradas existentes quedan en la raíz sin perder nada.
+- **Navegación por niveles**: entras tocando la carpeta y subes con el
+  botón ⬆ o tocando la ruta de **migas de pan** («Raíz / Trabajo /
+  Bancos»), que también abre un salto directo a cualquier carpeta
+  superior.
+- **Gestión completa** desde el menú ⋮ de cada carpeta: abrir,
+  renombrar, crear subcarpeta, **mover** (selector en árbol, con
+  protección anti-ciclos: no puedes mover una carpeta dentro de sí
+  misma) y eliminar. Al eliminar, las subcarpetas y entradas pasan a la
+  carpeta superior — nada se borra por accidente.
+- Las credenciales nuevas se crean en la carpeta que estés viendo y se
+  pueden mover con ⋮ → Mover a…; el selector muestra el árbol completo
+  con sangría.
+
+### Vista vertical con todo a la vista
+
+Cada credencial es ahora una **tarjeta vertical** que muestra TODOS sus
+campos de un vistazo (antes había que pulsar botones para ver cosas):
+
+- **Título** con avatar cuadrado de la inicial, y la ruta de su carpeta
+  cuando buscas.
+- **Usuario**, **contraseña**, **web** y **notas** en líneas
+  independientes con su icono temático.
+- La búsqueda (arriba) filtra en **TODAS** las carpetas y muestra la
+  ruta de cada resultado.
+
+### Iconos de acción en cada campo
+
+- **Copiado rápido**: un icono junto a usuario, contraseña, código 2FA
+  y web copia ese valor con un toque (antes: botones de texto «Usu.»/
+  «Pass» agrupados arriba).
+- **Seguridad**: las copias de valores sensibles se **autolimpian del
+  portapapeles a los 60 s**, como hacen los gestores serios.
+- **Mostrar/ocultar contraseña**: va enmascarada (••••••••) con icono de
+  ojo para revelarla (descifrado solo bajo demanda, se vuelve a ocultar
+  al reciclar la tarjeta).
+- **Mostrar/ocultar código 2FA**: el apartado OTP tiene su propio ojo;
+  el código no se calcula hasta mostrarlo (misma optimización de
+  recursos de siempre).
+
+### Anillo de tiempo del TOTP
+
+Cada código 2FA visible lleva un **anillo circular** que nace lleno y
+se va difuminando conforme pasa el periodo (30 s por defecto), con los
+**segundos restantes dentro**; en los últimos 5 s el anillo se pone
+rojo. Al llegar a cero el código se recalcula y el anillo se reinicia,
+sincronizado con el ritmo exacto del TOTP — como en las apps de
+autenticación modernas. El HOTP (contador) no lleva anillo y consume un
+código por revelación, como antes.
+
+### Detalles técnicos
+
+- Db v5: `ALTER TABLE vault ADD COLUMN grp` + tabla `vault_grp`
+  (anidadas por `parent`); migración con try por paso, sin pérdida de
+  datos (test incluido que simula una BD v4 real).
+- `TimerRingView` propio en Canvas (sin librerías): pista + arco con
+  desvanecimiento de opacidad + segundos dentro.
+- Un único handler de 250 ms reparte los ticks a los anillos visibles;
+  los códigos se recalculan solo al cruzar el límite del periodo. Se
+  detiene en onPause (sin timers zombis).
+- 13 iconos vectoriales Material nuevos (ojo, copiar, carpeta, llave,
+  globo…) tintados según el tema.
+- Eliminar usuario también borra su bóveda completa (entradas +
+  carpetas), como el resto de su sandbox.
+- Tests nuevos `VaultGroupsTest` (6 casos): CRUD de carpetas anidadas,
+  filtros por nivel, búsqueda global, re-parenteo al eliminar, limpieza
+  por usuario y migración real v4→v5.
+
+---
+
 # TurboDL 4.11 — Notas de la versión
 
 Fecha: 2026-11-23

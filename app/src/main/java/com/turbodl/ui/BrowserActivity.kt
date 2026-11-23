@@ -5437,6 +5437,9 @@ class BrowserActivity : Activity() {
                 val eraActivo = Users.active(this) == u.id
                 try { eng.db.clearHistory(u.id) } catch (e: Exception) { }
                 try { eng.db.clearCreds(u.id) } catch (e: Exception) { }
+                // 4.12: la bóveda (entradas + carpetas) también es parte
+                // del sandbox del usuario eliminado.
+                try { eng.db.clearVault(u.id) } catch (e: Exception) { }
                 Users.remove(this, u.id)
                 toast("Usuario eliminado (sandbox borrado)")
                 if (eraActivo) {

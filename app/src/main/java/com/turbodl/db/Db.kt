@@ -7,7 +7,12 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.turbodl.model.Task
 import java.util.ArrayList
 
-class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
+/**
+ * BD de TurboDL. [dbName] permite a los tests abrir una base aparte
+ * (default "turbodl.db" en producción).
+ */
+class Db(ctx: Context, dbName: String = "turbodl.db") :
+    SQLiteOpenHelper(ctx, dbName, null, 5) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -20,6 +25,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
         db.execSQL(SQL_HISTORY)
         db.execSQL(SQL_CREDS)
         db.execSQL(SQL_VAULT)
+        db.execSQL(SQL_VAULT_GRP)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldV: Int, newV: Int) {
@@ -35,6 +41,15 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
         // (AES-256-GCM, clave en AndroidKeyStore), igual que la tabla creds.
         if (oldV < 4) {
             try { db.execSQL(SQL_VAULT) } catch (e: Exception) { }
+        }
+        // v5 (4.12): carpetas anidadas en la bóveda (estilo grupos de
+        // KeePassXC). Cada entrada apunta a su carpeta (grp, 0 = raíz) y
+        // cada carpeta apunta a su padre (parent, 0 = raíz): árbol de
+        // profundidad libre. Las entradas y carpetas preexistentes quedan
+        // en la raíz sin tocar nada.
+        if (oldV < 5) {
+            try { db.execSQL("ALTER TABLE vault ADD COLUMN grp INTEGER DEFAULT 0") } catch (e: Exception) { }
+            try { db.execSQL(SQL_VAULT_GRP) } catch (e: Exception) { }
         }
     }
 
@@ -69,7 +84,20 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
             "CREATE TABLE vault(" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT," +
             "user TEXT, title TEXT, username TEXT, password TEXT," +
-            "url TEXT, otpcfg TEXT, otpkey TEXT, notes TEXT, time INTEGER)"
+            "url TEXT, otpcfg TEXT, otpkey TEXT, notes TEXT, time INTEGER," +
+            "grp INTEGER DEFAULT 0)"
+
+        // 4.12: carpetas de la bóveda (grupos anidados estilo KeePassXC).
+        //   user   — sandbox de usuario (igual que vault).
+        //   name   — nombre de la carpeta ("Bancos", "Trabajo"...).
+        //   parent — id de la carpeta contenedora (0 = raíz). Carpetas
+        //            dentro de carpetas a profundidad libre; la UI evita
+        //            ciclos al mover (no puede una carpeta moverse a un
+        //            descendiente propio).
+        private const val SQL_VAULT_GRP =
+            "CREATE TABLE vault_grp(" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "user TEXT, name TEXT, parent INTEGER DEFAULT 0, time INTEGER)"
     }
 
     private fun cv(t: Task): ContentValues {
@@ -294,31 +322,42 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
     // ---------------- bóveda (4.6) ----------------
 
     /** Entrada de la bóveda. password/otpkey vienen CIFRADOS con Secrets
-     *  desde la BD; la UI los descifra bajo demanda (nunca en la lista). */
+     *  desde la BD; la UI los descifra bajo demanda (nunca en la lista).
+     *  4.12: grp = id de la carpeta contenedora (0 = raíz). */
     class VaultRow(
         val id: Long, val user: String, val title: String, val username: String,
         val passwordEnc: String, val url: String,
         val otpCfgEnc: String,  // serialización Otp.Cfg.encode(), SIN cifrar (no es secreto)
         val otpKeyEnc: String,  // secret OTP CIFRADO con Secrets
-        val notes: String, val time: Long
+        val notes: String, val time: Long, val grp: Long = 0
     ) {
         /** ¿Tiene OTP configurado (otpcfg y otpkey no vacíos)? */
         fun hasOtp(): Boolean = otpCfgEnc.isNotBlank() && otpKeyEnc.isNotBlank()
     }
 
+    /** Carpeta de la bóveda (4.12): grupos anidados estilo KeePassXC.
+     *  parent = id de la carpeta contenedora (0 = raíz). */
+    class VaultGroup(
+        val id: Long, val user: String, val name: String,
+        val parent: Long, val time: Long
+    )
+
     /** Inserta o reemplaza una entrada de la bóveda. Si id==0 inserta;
      *  si id>0 actualiza. Los campos password y otpKey ya deben venir
-     *  CIFrados con [com.turbodl.util.Secrets.encrypt]. */
+     *  CIFrados con [com.turbodl.util.Secrets.encrypt].
+     *  4.12: grp = carpeta destino (0 = raíz). */
     @Synchronized
     fun saveVault(id: Long, user: String, title: String, username: String,
                   passwordEnc: String, url: String,
-                  otpCfgEnc: String, otpKeyEnc: String, notes: String): Long {
+                  otpCfgEnc: String, otpKeyEnc: String, notes: String,
+                  grp: Long = 0): Long {
         val v = ContentValues()
         if (id > 0) v.put("id", id)
         v.put("user", user); v.put("title", title); v.put("username", username)
         v.put("password", passwordEnc); v.put("url", url)
         v.put("otpcfg", otpCfgEnc); v.put("otpkey", otpKeyEnc)
         v.put("notes", notes); v.put("time", System.currentTimeMillis())
+        v.put("grp", grp)
         return if (id > 0) {
             writableDatabase.update("vault", v, "id=?", arrayOf(id.toString())).toLong()
             id
@@ -327,22 +366,40 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
         }
     }
 
-    /** Todas las entradas del usuario, ordenadas por título. */
+    private fun vaultRowOf(c: android.database.Cursor): VaultRow = VaultRow(
+        c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
+        c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "",
+        c.getString(6) ?: "", c.getString(7) ?: "", c.getString(8) ?: "",
+        c.getLong(9), try { c.getLong(10) } catch (e: Exception) { 0L }
+    )
+
+    private val VAULT_COLS =
+        "id,user,title,username,password,url,otpcfg,otpkey,notes,time,grp"
+
+    /** Entradas de una carpeta del usuario, ordenadas por título.
+     *  grp = 0 para la raíz. */
     @Synchronized
-    fun vaultAll(user: String): ArrayList<VaultRow> {
+    fun vaultAll(user: String, grp: Long = 0): ArrayList<VaultRow> {
         val out = ArrayList<VaultRow>()
         val c = readableDatabase.rawQuery(
-            "SELECT id,user,title,username,password,url,otpcfg,otpkey,notes,time " +
-            "FROM vault WHERE user=? ORDER BY title COLLATE NOCASE",
-            arrayOf(user))
-        c.use {
-            while (it.moveToNext()) out.add(VaultRow(
-                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
-                it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "",
-                it.getString(6) ?: "", it.getString(7) ?: "", it.getString(8) ?: "",
-                it.getLong(9)
-            ))
-        }
+            "SELECT $VAULT_COLS FROM vault WHERE user=? AND grp=? " +
+            "ORDER BY title COLLATE NOCASE",
+            arrayOf(user, grp.toString()))
+        c.use { while (it.moveToNext()) out.add(vaultRowOf(it)) }
+        return out
+    }
+
+    /** Búsqueda en TODAS las carpetas (título, usuario, url o notas). */
+    @Synchronized
+    fun vaultSearch(user: String, q: String): ArrayList<VaultRow> {
+        val out = ArrayList<VaultRow>()
+        val like = "%${q.replace("%", "").replace("_", "")}%"
+        val c = readableDatabase.rawQuery(
+            "SELECT $VAULT_COLS FROM vault WHERE user=? AND (" +
+            "title LIKE ? OR username LIKE ? OR url LIKE ? OR notes LIKE ?) " +
+            "ORDER BY title COLLATE NOCASE",
+            arrayOf(user, like, like, like, like))
+        c.use { while (it.moveToNext()) out.add(vaultRowOf(it)) }
         return out
     }
 
@@ -350,17 +407,18 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
     @Synchronized
     fun vaultGet(id: Long): VaultRow? {
         val c = readableDatabase.rawQuery(
-            "SELECT id,user,title,username,password,url,otpcfg,otpkey,notes,time " +
-            "FROM vault WHERE id=? LIMIT 1", arrayOf(id.toString()))
-        c.use {
-            if (it.moveToFirst()) return VaultRow(
-                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
-                it.getString(3) ?: "", it.getString(4) ?: "", it.getString(5) ?: "",
-                it.getString(6) ?: "", it.getString(7) ?: "", it.getString(8) ?: "",
-                it.getLong(9)
-            )
-        }
+            "SELECT $VAULT_COLS FROM vault WHERE id=? LIMIT 1",
+            arrayOf(id.toString()))
+        c.use { if (it.moveToFirst()) return vaultRowOf(it) }
         return null
+    }
+
+    /** Mueve una entrada a otra carpeta (0 = raíz). */
+    @Synchronized
+    fun vaultMove(id: Long, grp: Long) {
+        val v = ContentValues()
+        v.put("grp", grp); v.put("time", System.currentTimeMillis())
+        writableDatabase.update("vault", v, "id=?", arrayOf(id.toString()))
     }
 
     @Synchronized
@@ -374,6 +432,105 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "turbodl.db", null, 4) {
             "SELECT COUNT(*) FROM vault WHERE user=?", arrayOf(user))
         c.use { if (it.moveToFirst()) return it.getInt(0) }
         return 0
+    }
+
+    // ---------------- carpetas de la bóveda (4.12) ----------------
+
+    /** Todas las carpetas del usuario (el árbol lo construye la UI). */
+    @Synchronized
+    fun vaultGroups(user: String): ArrayList<VaultGroup> {
+        val out = ArrayList<VaultGroup>()
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,name,parent,time FROM vault_grp WHERE user=? " +
+            "ORDER BY name COLLATE NOCASE", arrayOf(user))
+        c.use {
+            while (it.moveToNext()) out.add(VaultGroup(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getLong(3), it.getLong(4)))
+        }
+        return out
+    }
+
+    /** Una carpeta por id. */
+    @Synchronized
+    fun vaultGroupGet(id: Long): VaultGroup? {
+        val c = readableDatabase.rawQuery(
+            "SELECT id,user,name,parent,time FROM vault_grp WHERE id=? LIMIT 1",
+            arrayOf(id.toString()))
+        c.use {
+            if (it.moveToFirst()) return VaultGroup(
+                it.getLong(0), it.getString(1) ?: "", it.getString(2) ?: "",
+                it.getLong(3), it.getLong(4))
+        }
+        return null
+    }
+
+    /** Inserta o renombra una carpeta. Si id==0 inserta con el padre dado;
+     *  si id>0 actualiza nombre (y padre, para "mover carpeta"). */
+    @Synchronized
+    fun saveVaultGroup(id: Long, user: String, name: String, parent: Long): Long {
+        val v = ContentValues()
+        if (id > 0) v.put("id", id)
+        v.put("user", user); v.put("name", name)
+        v.put("parent", parent); v.put("time", System.currentTimeMillis())
+        return if (id > 0) {
+            writableDatabase.update("vault_grp", v, "id=?", arrayOf(id.toString())).toLong()
+            id
+        } else writableDatabase.insert("vault_grp", null, v)
+    }
+
+    /**
+     * Elimina una carpeta: las subcarpetas pasan al padre de la eliminada
+     * y las entradas también (nada se pierde — el usuario confirmó antes).
+     * Es la política segura estilo KeePassXC al borrar un grupo.
+     */
+    @Synchronized
+    fun deleteVaultGroup(id: Long) {
+        val g = vaultGroupGet(id) ?: return
+        val parent = g.parent
+        // subcarpetas → al padre
+        val v = ContentValues()
+        v.put("parent", parent)
+        writableDatabase.update("vault_grp", v, "parent=?", arrayOf(id.toString()))
+        // entradas → al padre
+        val v2 = ContentValues()
+        v2.put("grp", parent)
+        writableDatabase.update("vault", v2, "grp=?", arrayOf(id.toString()))
+        writableDatabase.delete("vault_grp", "id=?", arrayOf(id.toString()))
+    }
+
+    /** Cuenta de entradas por carpeta (una consulta para pintar la lista). */
+    @Synchronized
+    fun vaultCountByGroup(user: String): HashMap<Long, Int> {
+        val out = HashMap<Long, Int>()
+        val c = readableDatabase.rawQuery(
+            "SELECT grp, COUNT(*) FROM vault WHERE user=? GROUP BY grp",
+            arrayOf(user))
+        c.use {
+            while (it.moveToNext()) out[it.getLong(0)] = it.getInt(1)
+        }
+        return out
+    }
+
+    /** Cuenta de subcarpetas por carpeta (para pintar la lista). */
+    @Synchronized
+    fun vaultSubCount(user: String): HashMap<Long, Int> {
+        val out = HashMap<Long, Int>()
+        val c = readableDatabase.rawQuery(
+            "SELECT parent, COUNT(*) FROM vault_grp WHERE user=? GROUP BY parent",
+            arrayOf(user))
+        c.use {
+            while (it.moveToNext()) out[it.getLong(0)] = it.getInt(1)
+        }
+        return out
+    }
+
+    /** Borra TODAS las entradas y carpetas de la bóveda de un usuario
+     *  (4.12: usado por Users.remove para limpiar el sandbox). */
+    @Synchronized
+    fun clearVault(user: String) {
+        writableDatabase.delete("vault", "user=?", arrayOf(user))
+        writableDatabase.delete("vault_grp", "user=?", arrayOf(user))
     }
 
     /** Incrementa el contador HOTP de una entrada y devuelve el nuevo
