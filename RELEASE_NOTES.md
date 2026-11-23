@@ -1,3 +1,93 @@
+# TurboDL 4.11 — Notas de la versión
+
+Fecha: 2026-11-23
+
+## Motor de bloqueo nativo Brave (AdblockAndroid)
+
+Pediste integrar la versión mejorada de AdblockAndroid
+([reaver961025/AdblockAndroid v2.0.0](https://github.com/reaver961025/AdblockAndroid/releases/tag/v2.0.0))
+como motor anti-ads del proyecto. Hecho: es ahora el **motor por
+defecto** de TurboDL, con fallback automático a FilterEngine.
+
+### Qué es este motor
+
+Es un fork modernizado del AdblockAndroid de Edsuns, cuyo núcleo C++
+se basa en **`brave/ad-block`** — el mismo motor de bloqueo que usa el
+navegador Brave. El fork arregla fallos fatales del original y mejora
+el análisis de reglas ~40x. Soporta EasyList y filtros AdGuard, con
+ocultamiento de elementos, CSS extendido, reglas de scriptlets y
+descarga de suscripciones en segundo plano (WorkManager).
+
+A diferencia de la librería oficial de Adblock Plus (que en su día
+intentamos integrar y nunca se pudo resolver de Maven), **esta sí está
+compilada**: el release v2.0.0 incluye las AARs preconstruidas con el
+binario nativo para arm64-v8a, armeabi-v7a, x86 y x86_64, y van vendidas
+en `app/libs/` (compilación offline, como el resto de libs vendidas).
+
+### Los tres motores, ahora así (Ajustes → Navegador → Motor de bloqueo)
+
+| Motor | Qué es | Estado |
+|---|---|---|
+| **Brave (nativo C++)** — **default** | Motor de Brave vía JNI (AdblockAndroid) | Recomendado |
+| FilterEngine (Kotlin) | El motor propio, ligero, sin nativos | Ligero / fallback |
+| Solo hosts | Solo listas de dominios (StevenBlack) | Mínimo |
+
+- **Nueva instalación o usuario sin preferencia → motor Brave**. Quien
+  ya eligió un motor explícitamente en 4.9/4.10 conserva su elección.
+- En equipos con **< 1,5 GB de RAM** la preferencia Brave se sirve con
+  FilterEngine (el motor C++ mantiene las listas en memoria nativa).
+- Si el motor nativo no inicializara en algún dispositivo, la fachada
+  cae automáticamente a FilterEngine (patrón self-test/fusible que ya
+  existía, extendido a ambos motores).
+
+### Integración técnica
+
+- **Suscripciones unificadas**: el catálogo de TurboDL (Ajustes →
+  Listas de filtros) sigue siendo la única fuente de verdad. Las listas
+  EasyList/AdGuard marcadas se convierten en suscripciones del motor
+  Brave (addFilter es idempotente por URL); las formato hosts
+  (StevenBlack) solo las aplica FilterEngine — el motor Brave no lee
+  ese formato, y Ajustes avisa si solo hay hosts marcadas.
+- **`BraveEngine.kt`**: wrapper propio con la misma disciplina de la
+  fachada — todo con `catch(Throwable)`, shouldBlock falla abierto
+  (deja pasar) si el motor no está listo, fusible anti-sobre-bloqueo
+  por sesión compartido, y nunca se usa el variante de
+  `shouldIntercept` que hace `runBlocking` hacia el hilo principal.
+- **Cosméticos**: en modo Brave, el ocultamiento de elementos y los
+  scriptlets los inyecta el motor nativo en `onPageStarted`
+  (performScript), con mejor cobertura que el CSS propio (extended CSS
+  + scriptlets); el CSS de FilterEngine no se duplica.
+- **Escudo**: el panel muestra la regla real que devolvió el C++
+  (FilterResult.rule) cuando el bloqueo viene de Brave.
+- **R8/ProGuard**: keeps explícitos para el paquete del cliente
+  (el constructor JNI de MatchResult), los workers de WorkManager y
+  las clases generadas por Mezzanine (scriptlets embebidos).
+- **Dependencias nuevas**: kotlinx-coroutines 1.8.0,
+  kotlinx-serialization-json 1.6.3, WorkManager 2.9.1, Timber 5.0.1 y
+  HttpRequest (com.github.Edsuns, vía JitPack). Las clases generadas
+  por Mezzanine ya vienen dentro de la AAR (no hace falta el plugin).
+
+### Licencia
+
+El motor es **LGPL-2.1** (se conserva del upstream y del
+`brave/ad-block` del que deriva). Va dinámicamente enlazado como AAR
+separada, con su código fuente público en GitHub; los créditos y la
+licencia del fork están en el repositorio upstream. El resto de
+TurboDL no se ve afectado.
+
+### Notas
+
+- APK: los binarios nativos del motor (~1 MB por ABI, 4 ABIs) añaden
+  ~2 MB comprimidos al APK.
+- Tests del motor (FilterEngine, HostsAdapter, AdblockCatalog,
+  AdBlockTypeOf, ExemptDomain) — todos pasan.
+- El primer arranque tras actualizar: el motor Brave descarga sus
+  listas (EasyList + EasyPrivacy) vía WorkManager; hasta que terminen
+  (~segundos con buena red), las peticiones pasan sin bloquear, igual
+  que la ventana de "cargando motor…" histórica.
+
+---
+
 # TurboDL 4.10 — Notas de la versión
 
 Fecha: 2026-11-22

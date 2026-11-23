@@ -13,14 +13,11 @@ dependencyResolutionManagement {
     repositories {
         maven { url "https://maven.aliyun.com/repository/google" }
         maven { url "https://maven.aliyun.com/repository/public" }
-        // 4.1: libadblockplus-android (Adblock Plus oficial) se publicaba en
-        // jcenter, retirado en 2021. Alibaba public mirror conservaba una
-        // copia; si no está, se prueba con jcenter (que sigue sirviendo
-        // artefactos existentes en modo solo-lectura). Si ninguno
-        // resolviera, la compilación sigue funcionando: el wrapper
-        // AdblockPlusEngine usa reflection para detectar la ausencia de
-        // las clases AdblockHelper y cae al motor 100% Kotlin (FilterEngine)
-        // que ya estaba integrado.
+        // 4.11: motor Brave nativo (AdblockAndroid fork reaver961025). Los
+        // AARs del motor van vendidos en app/libs; de JitPack solo se
+        // resuelven las dependencias runtime de la librería: HttpRequest
+        // (descarga de listas en DownloadWorker) y Timber.
+        maven { url "https://jitpack.io" }
         maven { url "https://maven.aliyun.com/repository/jcenter" }
         maven { url "https://jcenter.bintray.com" }
         google()

@@ -80,25 +80,42 @@ public final class AdBlockEngine {
     /** Motivo por el que el motor no está disponible (para diagnóstico). */
     private static volatile String motivo = "";
 
-    /** 4.9: motor elegido por el usuario en Ajustes.
-     *  "kotlin" = FilterEngine con todas las listas (default);
-     *  "hosts"  = solo listas Format.HOSTS vía HostsAdapter. */
+    /** 4.9/4.11: motor elegido por el usuario en Ajustes.
+     *  "kotlin" = FilterEngine con todas las listas;
+     *  "hosts"  = solo listas Format.HOSTS vía HostsAdapter;
+     *  "brave"  = motor nativo C++ brave/ad-block (AdblockAndroid, default). */
     public static final String ENGINE_KOTLIN = "kotlin";
     public static final String ENGINE_HOSTS = "hosts";
+    public static final String ENGINE_BRAVE = "brave";
 
-    /** Devuelve el motor elegido ("kotlin" o "hosts"); nunca null. */
+    /** Devuelve el motor elegido ("brave" | "kotlin" | "hosts"); nunca null.
+     *  4.11: el DEFAULT es el motor nativo Brave para instalaciones nuevas
+     *  y usuarios que no hayan tocado el selector. */
     public static String selectedEngine(Context ctx) {
         String s = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
-            .getString("adblockEngine", ENGINE_KOTLIN);
-        return ENGINE_HOSTS.equals(s) ? ENGINE_HOSTS : ENGINE_KOTLIN;
+            .getString("adblockEngine", ENGINE_BRAVE);
+        if (ENGINE_HOSTS.equals(s)) return ENGINE_HOSTS;
+        if (ENGINE_KOTLIN.equals(s)) return ENGINE_KOTLIN;
+        return ENGINE_BRAVE;
     }
 
-    /** 4.9: cambia el motor y fuerza la recarga en segundo plano.
-     *  Llamar desde el hilo UI tras el cambio en Ajustes. Si el
-     *  bloqueador está apagado, solo persiste la preferencia (init()
-     *  correrá cuando se active). */
+    /** 4.11: modo Brave EFECTIVO — preferencia "brave" y RAM >= 1,5 GB
+     *  (el motor C++ mantiene las listas en memoria nativa; en equipos
+     *  humildes se usa FilterEngine Kotlin). El motor Kotlin es además el
+     *  fallback si BraveEngine.ensure fallara al inicializarse. */
+    public static boolean usaBrave(Context ctx) {
+        return ENGINE_BRAVE.equals(selectedEngine(ctx)) && !esLowRam(ctx);
+    }
+
+    /** 4.9/4.11: cambia el motor ("brave" | "kotlin" | "hosts") y fuerza
+     *  la recarga en segundo plano. Llamar desde el hilo UI tras el
+     *  cambio en Ajustes. Si el bloqueador está apagado, solo persiste
+     *  la preferencia (init() correrá cuando se active). */
     public static void setEngine(Context ctx, String engineId) {
-        String val = ENGINE_HOSTS.equals(engineId) ? ENGINE_HOSTS : ENGINE_KOTLIN;
+        String val;
+        if (ENGINE_HOSTS.equals(engineId)) val = ENGINE_HOSTS;
+        else if (ENGINE_KOTLIN.equals(engineId)) val = ENGINE_KOTLIN;
+        else val = ENGINE_BRAVE;
         ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
             .edit().putString("adblockEngine", val).apply();
         if (activado(ctx)) {
@@ -130,15 +147,33 @@ public final class AdBlockEngine {
 
     /**
      * Lanza la inicialización una sola vez (en segundo plano).
-     * 4.9: solo queda FilterEngine; el motor se elige en Ajustes
-     * (kotlin/hosts) y {@link #init} filtra las listas según el modo.
+     * 4.11: en modo Brave (default) inicializa el motor nativo
+     * (suscripciones + descarga vía WorkManager); si el motor nativo no
+     * se pudo crear, cae a FilterEngine Kotlin. En modos kotlin/hosts
+     * solo corre {@link #init} como en 4.9.
      */
     public static void ensure(Context ctx) {
         if (state != STATE_INIT) return;
         synchronized (LOCK) {
             if (state != STATE_INIT) return;
             Thread t = new Thread(() -> {
-                try { init(ctx); } catch (Throwable e) { fallo(e); }
+                try {
+                    if (usaBrave(ctx)) {
+                        com.turbodl.adblock.BraveEngine.ensure(ctx);
+                        if (com.turbodl.adblock.BraveEngine.unavailable()) {
+                            Log.w("AdBlockEngine",
+                                "motor Brave no disponible: fallback FilterEngine ("
+                                    + com.turbodl.adblock.BraveEngine.statusLine(ctx) + ")");
+                            init(ctx);
+                        }
+                        // NOTA: si Brave inicializó pero aún descarga listas
+                        // (ready()==false), se deja así: shouldBlock falla
+                        // abierto (deja pasar) hasta que haya datos, igual
+                        // que la ventana de "cargando motor…" histórica.
+                    } else {
+                        init(ctx);
+                    }
+                } catch (Throwable e) { fallo(e); }
             });
             t.setDaemon(true);
             t.setName("adblock-init");
@@ -286,12 +321,16 @@ public final class AdBlockEngine {
     }
 
     /**
-     * true si HAY un motor listo para responder (4.9): solo FilterEngine
-     * (modo kotlin o hosts, ambos corren sobre el mismo FilterEngine con
-     * listas distintas). El navegador usa este método para decidir entre
-     * la API del motor y la lista compacta de hosts.
+     * true si HAY un motor listo para responder (4.11): primero el
+     * nativo Brave (solo en modo brave y con listas ya instaladas);
+     * si no, FilterEngine Kotlin (motor activo en kotlin/hosts y
+     * fallback de Brave). El navegador usa este método para decidir
+     * entre la API del motor y la lista compacta de hosts.
      */
     public static boolean ready() {
+        try {
+            if (com.turbodl.adblock.BraveEngine.ready()) return true;
+        } catch (Throwable e) { }
         return state == STATE_READY && engine != null;
     }
 
@@ -305,15 +344,20 @@ public final class AdBlockEngine {
 
     /** Fusible anti-sobre-bloqueo: pausa el motor por esta sesión y deja solo
      *  la lista de hosts. Lo llama el navegador si el motor bloquea una
-     *  proporción anómala de peticiones (p. ej. todas las imágenes). */
+     *  proporción anómala de peticiones (p. ej. todas las imágenes).
+     *  4.11: pausa AMBOS motores (nativo y Kotlin); al volver a activar
+     *  desde Ajustes se reintenta la inicialización. */
     public static void deshabilitarSesion() {
+        try { com.turbodl.adblock.BraveEngine.deshabilitarSesion(); } catch (Throwable e) { }
         fallo(new Exception("fusible: proporción de bloqueo anómala"));
     }
 
-    /** 4.9: nombre legible del motor elegido, para UI y diagnóstico. */
+    /** 4.9/4.11: nombre legible del motor elegido, para UI y diagnóstico.
+     *  En RAM baja la preferencia "brave" se sirve con FilterEngine. */
     public static String engineName(Context ctx) {
-        return ENGINE_HOSTS.equals(selectedEngine(ctx))
-            ? "Solo hosts" : "FilterEngine (Kotlin)";
+        if (ENGINE_HOSTS.equals(selectedEngine(ctx))) return "Solo hosts";
+        if (usaBrave(ctx)) return "Brave (nativo)";
+        return "FilterEngine (Kotlin)";
     }
 
     /**
@@ -345,18 +389,26 @@ public final class AdBlockEngine {
             }
             sb.append('\n');
         }
-        // 4.9: estado del motor (sin mención a Adblock Plus).
+        // 4.11: estado del motor nativo Brave (línea propia en modo brave)
+        // y del motor Kotlin (activo o fallback).
+        if (ENGINE_BRAVE.equals(selectedEngine(ctx))) {
+            try {
+                sb.append("- Motor nativo: ")
+                    .append(com.turbodl.adblock.BraveEngine.statusLine(ctx))
+                    .append('\n');
+            } catch (Throwable e) { }
+        }
         if (state == STATE_READY) {
             FilterEngine eng = engine;
-            sb.append("- Estado: LISTO");
+            sb.append("- Motor Kotlin: LISTO");
             if (eng != null) sb.append(" (").append(eng.getNetworkRules()).append(" reglas)");
             sb.append('\n');
         } else if (state == STATE_FALLIDO) {
-            sb.append("- Estado: NO DISPONIBLE (")
+            sb.append("- Motor Kotlin: NO DISPONIBLE (")
                 .append(motivo == null || motivo.isEmpty() ? "error de carga" : motivo)
                 .append(")\n- Filtrando con la lista básica de hosts (≈0 MB de RAM)\n");
-        } else {
-            sb.append("- Estado: cargando…\n");
+        } else if (!ENGINE_BRAVE.equals(selectedEngine(ctx))) {
+            sb.append("- Motor Kotlin: cargando…\n");
         }
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
@@ -467,14 +519,22 @@ public final class AdBlockEngine {
     /**
      * true si el subrecurso debe bloquearse. Sin motor (no listo o caído)
      * devuelve false SIEMPRE: fallar es dejar pasar, no bloquear de más.
-     * 4.9: solo FilterEngine (modo kotlin o hosts); el motor oficial ABP
-     * se eliminó.
+     * 4.11: primero el motor nativo Brave (modo brave con listas
+     * instaladas); si no responde, FilterEngine Kotlin (motor activo en
+     * kotlin/hosts y fallback de Brave).
      */
     public static boolean shouldBlock(String pageUrl, String reqUrl, String type) {
         if (!httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return false;
         try {
             // sitio con el bloqueo desactivado por el usuario: dejar pasar todo
             if (exempted(pageUrl)) return false;
+            // Intento 1: motor nativo Brave (solo ready() en modo brave).
+            if (com.turbodl.adblock.BraveEngine.ready()
+                && com.turbodl.adblock.BraveEngine.shouldBlock(pageUrl, reqUrl, type)) {
+                return true;
+            }
+            // Intento 2: FilterEngine Kotlin (null en modo Brave mientras
+            // el nativo carga sus listas: falla abierto, deja pasar).
             FilterEngine eng = engine;
             if (eng == null) return false;
             // orden del motor: (recurso pedido, página, tipo). El frame
@@ -491,6 +551,12 @@ public final class AdBlockEngine {
         if (!httpLimpia(pageUrl) || !httpLimpia(reqUrl)) return "";
         try {
             if (exempted(pageUrl)) return "";
+            // Intento 1: motor nativo Brave — la regla que el C++ matched.
+            if (com.turbodl.adblock.BraveEngine.ready()) {
+                String r = com.turbodl.adblock.BraveEngine.ruleFor(pageUrl, reqUrl, type);
+                if (r != null && !r.isEmpty()) return r;
+            }
+            // Intento 2: FilterEngine Kotlin.
             FilterEngine eng = engine;
             if (eng == null) return "";
             String p = eng.debugMatch(reqUrl, pageUrl, type);
@@ -502,14 +568,15 @@ public final class AdBlockEngine {
 
     /** CSS cosmético (ocultar elementos) para la página; vacío si no hay.
      *  Llamar desde un hilo de fondo; el resultado se limita a 256 KB.
-     *  4.9: en modo "hosts" el motor no tiene cosméticos (solo reglas de
-     *  red por dominio), así que esto devuelve "" naturalmente — el
-     *  motor se cargó solo con listas HOSTS y FilterEngine.cssFor no
-     *  encuentra selectores. */
+     *  4.11: en modo Brave devuelve "" — el ocultamiento de elementos y
+     *  los scriptlets los inyecta el motor nativo vía performScript en
+     *  onPageStarted (mejor cobertura: extended CSS + scriptlets), así
+     *  que la inyección CSS propia de la app NO debe duplicarse. */
     public static String cssFor(String pageUrl) {
         if (!httpLimpia(pageUrl)) return "";
         try {
             if (exempted(pageUrl)) return "";
+            if (com.turbodl.adblock.BraveEngine.ready()) return "";
             FilterEngine eng = engine;
             if (eng == null) return "";
             String css = eng.cssFor(pageUrl, CSS_MAX);
@@ -539,6 +606,19 @@ public final class AdBlockEngine {
      * por descarga + HostsAdapter al cargar (no al descargar).
      */
     public static void updateLists(Context ctx, Cb cb) {
+        // 4.11: en modo Brave, "Actualizar listas" re-descarga las
+        // suscripciones del motor nativo (WorkManager de la librería) —
+        // los .txt del catálogo no se usan en ese modo.
+        if (usaBrave(ctx)) {
+            try {
+                com.turbodl.adblock.BraveEngine.ensure(ctx);
+                com.turbodl.adblock.BraveEngine.reloadAll();
+                uiPost(() -> cb.on(true, "suscripciones del motor Brave encoladas"));
+            } catch (Throwable e) {
+                uiPost(() -> cb.on(false, "motor Brave no inicializado"));
+            }
+            return;
+        }
         Thread t = new Thread(() -> {
             int okN = 0;
             int totalN = 0;

@@ -49,27 +49,22 @@
 -keep class org.jsoup.** { *; }
 -dontwarn org.jsoup.**
 
-# --- libadblockplus-android (Adblock Plus oficial, 4.1) ---
-# La libreria expone objetos Java al codigo nativo (libadblockplus + V8) por
-# nombre de metodo JNI. R8 no debe renombrar ni eliminar ni una sola clase
-# del paquete raiz org.adblockplus.libadblockplus: un NoSuchMethodError en
-# runtime significaria que la pagina se queda en blanco al cargar. Las
-# reglas provistas por la propia AAR (consumer-rules) ya cubren esto, pero
-# se reafirman aqui por si la AAR no se resolvio (modo fallback) y alguien
-# la construye manualmente desde el codigo fuente.
--keep class org.adblockplus.libadblockplus.** { *; }
--keep class org.adblockplus.libadblockplus.android.** { *; }
--keep class org.adblockplus.libadblockplus.android.webview.** { *; }
--keep class org.adblockplus.libadblockplus.android.settings.** { *; }
-# Mantener metodos nativos de cualquier clase (JNI de V8 + libadblockplus).
--keepclasseswithmembernames class * {
-    native <methods>;
+# --- motor Brave nativo (AdblockAndroid fork reaver961025, 4.11) ---
+# adblock-client expone MatchResult al C++ (brave/ad-block) por JNI: el
+# constructor (boolean, String, String) se invoca desde libadblock-client.so
+# y R8 NO debe renombrarlo ni eliminarlo. Las clases del filtro y las
+# generadas por Mezzanine (scriptlets JS embebidos) también se conservan:
+# WorkManager instancia los workers por nombre y kotlinx-serialization
+# refleja los serializers de Filter.
+-keep class io.github.edsuns.adblockclient.** { *; }
+-keep class io.github.edsuns.adfilter.** { *; }
+-keep class io.github.edsuns.net.** { *; }
+-keep class com.anthonycr.mezzanine.** { *; }
+-keepclassmembers class io.github.edsuns.adblockclient.MatchResult {
+    <init>(boolean,java.lang.String,java.lang.String);
 }
-# Mantener miembros publicos de AdblockHelper (entry point singleton).
--keepclassmembers class org.adblockplus.libadblockplus.android.AdblockHelper {
-    public *;
-}
--dontwarn org.adblockplus.**
-# Timber: la AAR la usa para logging; se incluye via dependencia transitiva.
+-dontwarn io.github.edsuns.**
+-dontwarn com.anthonycr.mezzanine.**
+# Timber: la librería Brave lo usa para logging; dependencia directa.
 -keep class timber.log.** { *; }
 -dontwarn timber.log.**

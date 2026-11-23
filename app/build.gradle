@@ -18,8 +18,8 @@ android {
         // o no se cargue — el wrapper decide en tiempo de ejecución.
         minSdk 26
         targetSdk 34
-        versionCode 29
-        versionName "4.10"
+        versionCode 30
+        versionName "4.11"
     }
 
     signingConfigs {
@@ -101,14 +101,23 @@ dependencies {
     // minSdk 26 sigue: setProxyOverride se ignora en <9, donde el proxy del
     // navegador es el del sistema (sin proxy propio) — documentado en UI.
     implementation 'androidx.webkit:webkit:1.11.0'
-    // 4.9: el motor de bloqueo es 100% Kotlin (FilterEngine + HostsAdapter).
-    // El wrapper de la librería nativa Adblock Plus (libadblockplus-android,
-    // V8, ~30 MB) se eliminó: la AAR se publicaba en jcenter (retirado en
-    // 2021) y ningún mirror la resuelve, así que `AdblockPlusEngine.kt`
-    // siempre devolvía "no instalado" sin aportar nada. Sin la lib nativa
-    // el APK pesa menos y el diagnóstico deja de ser confuso. El usuario
-    // elige entre FilterEngine (EasyList + cosméticos) y Solo hosts en
-    // Ajustes → Navegador → Motor de bloqueo.
+    // 4.11: motor de bloqueo nativo Brave (AdblockAndroid, fork
+    // reaver961025/AdblockAndroid v2.0.0, LGPL-2.1). Las dos AARs del
+    // motor (ad-filter + adblock-client, con libadblock-client.so para
+    // arm64/armv7/x86/x86_64) van vendidas en app/libs y entran por el
+    // fileTree de arriba. Sus dependencias runtime se resuelven por
+    // Gradle: coroutines + serialization (estado de suscripciones),
+    // WorkManager (descarga e instalación de listas), Timber (logs) y
+    // HttpRequest (com.github.Edsuns, descarga HTTP de las listas).
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3'
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    implementation 'com.jakewharton.timber:timber:5.0.1'
+    implementation 'com.github.Edsuns:HttpRequest:0.2'
+    // El usuario elige el motor en Ajustes → Navegador → Motor de
+    // bloqueo: Brave (nativo, default), FilterEngine (Kotlin) o Solo
+    // hosts. Fallback automático a FilterEngine si el motor nativo
+    // falla o el dispositivo tiene < 1,5 GB de RAM.
     // JUnit solo para los tests JVM del motor de bloqueo (no entra en el APK)
     testImplementation 'junit:junit:4.13.2'
     // 4.3: Robolectric para tests JVM que tocan SQLite (NotesDb) sin

@@ -715,31 +715,45 @@ class SettingsActivity : Activity() {
         buildUi()
     }
 
-    /** 4.9: elige el motor de bloqueo (FilterEngine Kotlin vs Solo hosts).
-     *  Al cambiar, se persiste y se fuerza la recarga del motor en segundo
-     *  plano (si el bloqueador está activo). En modo "Solo hosts" solo se
-     *  cargan las listas Format.HOSTS del catálogo, así que avisamos si el
-     *  usuario las tiene todas desmarcadas. */
+    /** 4.9/4.11: elige el motor de bloqueo entre los tres disponibles:
+     *  Brave (nativo C++, recomendado y default), FilterEngine (Kotlin)
+     *  y Solo hosts (mínimo). Al cambiar, se persiste y se fuerza la
+     *  recarga del motor en segundo plano (si el bloqueador está activo).
+     *  En RAM < 1,5 GB la opción Brave se sirve con FilterEngine. */
     private fun pickAdblockEngine() {
         val cur = com.turbodl.engine.AdBlockEngine.selectedEngine(this)
+        val ids = arrayOf("brave", "kotlin", "hosts")
         val opts = arrayOf(
-            "FilterEngine (Kotlin) — recomendado",
+            "Brave (nativo C++) — recomendado",
+            "FilterEngine (Kotlin) — ligero, sin nativos",
             "Solo hosts — mínimo, sin cosméticos"
         )
-        val idx = if (cur == "hosts") 1 else 0
+        val idx = ids.indexOf(cur).coerceAtLeast(0)
         AlertDialog.Builder(this)
             .setTitle("Motor de bloqueo de anuncios")
             .setSingleChoiceItems(opts, idx) { d, which ->
-                val engineId = if (which == 1) "hosts" else "kotlin"
+                val engineId = ids[which]
                 d.dismiss()
-                if (engineId == "hosts") {
-                    // avisar: en modo hosts solo sirven las listas HOSTS
-                    val tieneHosts = com.turbodl.adblock.AdblockCatalog
-                        .selected(this).any {
-                            it.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS }
-                    if (!tieneHosts) {
-                        toast("Modo Solo hosts: marca una lista tipo hosts " +
-                            "(p. ej. StevenBlack) en Listas de filtros")
+                when (engineId) {
+                    "hosts" -> {
+                        // avisar: en modo hosts solo sirven las listas HOSTS
+                        val tieneHosts = com.turbodl.adblock.AdblockCatalog
+                            .selected(this).any {
+                                it.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS }
+                        if (!tieneHosts) {
+                            toast("Modo Solo hosts: marca una lista tipo hosts " +
+                                "(p. ej. StevenBlack) en Listas de filtros")
+                        }
+                    }
+                    "brave" -> {
+                        // avisar: el motor nativo no lee listas formato hosts
+                        val soloHosts = com.turbodl.adblock.AdblockCatalog
+                            .selected(this).all {
+                                it.format == com.turbodl.adblock.AdblockCatalog.Format.HOSTS }
+                        if (soloHosts) {
+                            toast("Motor Brave: marca listas EasyList/AdGuard " +
+                                "en Listas de filtros (no lee formato hosts)")
+                        }
                     }
                 }
                 com.turbodl.engine.AdBlockEngine.setEngine(this, engineId)

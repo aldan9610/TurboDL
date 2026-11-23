@@ -1684,6 +1684,10 @@ class BrowserActivity : Activity() {
         ws.allowContentAccess = true
         Ui.applyUa(w, eng.sp, desktopMode)
         w.addJavascriptInterface(Bridge(t.uid), "__tdlBridge")
+        // 4.11: en modo Brave (nativo), registrar los puentes JS del motor
+        // (ocultamiento de elementos + scriptlets). Sin efecto en los demás
+        // modos: setupWebView se llama con el singleton no inicializado.
+        try { com.turbodl.adblock.BraveEngine.setupWebView(w) } catch (e: Exception) { }
         w.webViewClient = client
         w.webChromeClient = chrome
         w.setDownloadListener { url, _, _, _, _ ->
@@ -2942,6 +2946,12 @@ class BrowserActivity : Activity() {
                     hideSuggestions()
                 }
             }
+            // 4.11: en modo Brave, el motor nativo inyecta aquí el
+            // ocultamiento de elementos (cosméticos, extended CSS) y los
+            // scriptlets; el CSS cosmético propio (cssFor) NO se aplica en
+            // ese modo para no duplicar (cssFor devuelve "" si Brave está
+            // listo). No-op en los demás modos.
+            try { com.turbodl.adblock.BraveEngine.performScript(view, url) } catch (e: Exception) { }
             renderStrip()
         }
 
