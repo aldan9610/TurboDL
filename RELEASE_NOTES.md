@@ -1,3 +1,50 @@
+# TurboDL 4.13 — Notas de la versión
+
+Fecha: 2026-11-23
+
+## Volver al menú principal desde el navegador
+
+Reportaste dos cosas en la barra inferior del navegador: que los dos
+botones centrales hacían lo mismo y que el que está al lado del de
+icono Home no se entendía. Tenías razón — los dos (⌂ y ▖) acababan
+mostrando la misma vista de accesos *dentro* del navegador, y no
+existía ninguna forma de volver al menú principal de la app (la única
+salida era ☰ → Salir, que cierra TurboDL entera). Corregido:
+
+### Barra inferior: cada botón hace una cosa distinta
+
+- **‹ / ›** — atrás / adelante en el historial de la pestaña (sin
+  cambios).
+- **⌂ Home** — igual que siempre: 1er toque limpia la pestaña y muestra
+  la vista de accesos del navegador; 2º toque la oculta. Es el Home
+  *del navegador*, no de la app.
+- **App** (antes ▖, el que no se entendía) — ahora es el botón que
+  pediste: **vuelve al menú principal de TurboDL en un solo toque**.
+  Cierra el navegador y abre el menú; antes de salir **persiste las
+  pestañas** (se restauran al reabrir el navegador, no se pierde la
+  sesión ni las URLs abiertas). La etiqueta de texto «App» sustituye al
+  glifo ▖ que nadie podía interpretar.
+- **[1] Pestañas** y **☰ Menú** — sin cambios.
+
+### Nueva entrada «🏠 Menú principal» en el menú ☰
+
+La misma acción, accesible desde el menú del navegador, colocada justo
+encima de «🚪 Salir» (que sigue cerrando la aplicación entera). Así la
+función se descubre aunque no sepas qué hace cada botón de la barra.
+
+### Detalles técnicos
+
+- El botón «App» y la celda «Menú principal» lanzan MainActivity
+  (launchMode singleTask + NEW_TASK | CLEAR_TOP) y hacen finish() del
+  navegador — sin finishAffinity(), para no arrastrar a MainActivity si
+  comparten tarea.
+- persistTabs() antes de salir: las pestañas viven en SharedPreferences
+  (tabsV21) y restoreTabs() las recupera en el próximo arranque del
+  navegador.
+- Sin cambios de esquema de BD ni permisos; versión 32 (4.13).
+
+---
+
 # TurboDL 4.12 — Notas de la versión
 
 Fecha: 2026-11-23

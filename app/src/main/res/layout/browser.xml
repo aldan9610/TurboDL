@@ -415,21 +415,24 @@
             android:textColor="#212121"
             android:textSize="20sp" />
 
-        <!-- 4.2.3: botón explícito para volver rápido a la vista principal
-             de la aplicación (los paneles de accesos directos). A
-             diferencia de btnHome (que reinicia la búsqueda y luego va
-             a la vista principal en dos toques), este botón va directo
-             e inmediato a la vista principal en un solo toque. -->
+        <!-- 4.13: botón "App" — volver al MENÚ PRINCIPAL de TurboDL
+             (MainActivity) desde el navegador. Antes (4.2.3–4.12) este
+             botón solo mostraba la vista de accesos DENTRO del navegador
+             (icono ▖, imposible de distinguir de btnHome ⌂ — reportado).
+             Ahora cierra el navegador y abre el menú principal; las
+             pestañas se persisten antes de salir y se restauran al
+             reabrir el navegador. -->
         <Button
             android:id="@+id/btnMainHome"
             style="?android:attr/borderlessButtonStyle"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_weight="1"
-            android:contentDescription="Volver a la vista principal"
-            android:text="&#9636;"
+            android:contentDescription="Volver al menú principal de TurboDL"
+            android:text="App"
+            android:textStyle="bold"
             android:textColor="#212121"
-            android:textSize="20sp" />
+            android:textSize="15sp" />
 
         <Button
             android:id="@+id/btnTabCount"

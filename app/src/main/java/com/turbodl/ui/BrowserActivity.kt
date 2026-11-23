@@ -717,20 +717,26 @@ class BrowserActivity : Activity() {
         //   2º toque (cuando la vista principal ya está visible): la
         //   oculta y deja el campo listo para escribir una nueva búsqueda.
         findViewById<Button>(R.id.btnHome).setOnClickListener { onHomePressed() }
-        // 4.2.5: botón explícito "volver a la vista principal". A
-        // diferencia de btnHome (1er toque limpia la pestaña, 2º va a la
-        // vista principal), este botón va SIEMPRE DIRECTO a la vista
-        // principal en un solo toque, sin tocar la pestaña actual (la URL
-        // cargada se conserva tal cual). Es el atajo para volver al menú
-        // principal de la aplicación. Ya no es un toggle: siempre muestra
-        // la vista principal (lo que pediste).
+        // 4.13: botón "App" — vuelve al MENÚ PRINCIPAL de la aplicación
+        // (MainActivity) en un solo toque. Antes (4.2.5–4.12) este botón
+        // solo mostraba la vista de accesos DENTRO del navegador, lo que
+        // lo hacía parecer un duplicado de btnHome y su icono ▖ no decía
+        // nada (lo reportaste). Ahora:
+        //   · persiste las pestañas antes de salir (restoreTabs las
+        //     recupera al reabrir el navegador: no se pierde nada),
+        //   · abre MainActivity (launchMode singleTask + CLEAR_TOP),
+        //   · cierra el navegador (finish).
+        // El botón ⌂ (btnHome) conserva su flujo de 2 toques DENTRO del
+        // navegador; ☰ → Salir sigue cerrando la app entera.
         findViewById<Button>(R.id.btnMainHome).setOnClickListener {
-            showHome(true)
-            editUrl.setText("")
-            editUrl.hint = "Página de inicio"
-            findViewById<Button>(R.id.btnClear).visibility = View.GONE
-            editUrl.requestFocus()
-            showKb()
+            persistTabs()
+            try {
+                startActivity(android.content.Intent(this, MainActivity::class.java).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                })
+            } catch (e: Exception) { }
+            finish()
         }
         btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
@@ -3939,6 +3945,19 @@ class BrowserActivity : Activity() {
             MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
             MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
             MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPages() },
+            // 4.13: misma acción que el botón "App" de la barra inferior:
+            // volver al menú principal de TurboDL (no confundir con
+            // "Salir", que cierra la aplicación entera).
+            MenuCell("🏠", "Menú principal") {
+                persistTabs()
+                try {
+                    startActivity(android.content.Intent(this, MainActivity::class.java).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                            android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    })
+                } catch (e: Exception) { }
+                finish()
+            },
             MenuCell("🚪", "Salir") { finishAffinity() }
         )
     }
