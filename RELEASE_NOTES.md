@@ -1,3 +1,51 @@
+# TurboDL 4.14 — Notas de la versión
+
+Fecha: 2026-11-23
+
+## El atrás del teléfono ahora también lleva al menú principal
+
+En la 4.13 el botón "App" de la barra ya volvía al menú principal, pero
+el **atrás del sistema** (el botón físico/gesto de tu teléfono) seguía
+teniendo el flujo antiguo: al agotar las capas del navegador te avisaba
+con *"Pulsa atrás otra vez para salir"* y el segundo toque cerraba
+TurboDL entera. Lo reportaste como mal flujo UX y tienes razón: si el
+usuario quiere salir del navegador, lo natural es volver al menú de la
+app, no cerrar el programa.
+
+### Nuevo flujo del atrás del sistema (máquina de estados 4.0 U4)
+
+El atrás se retira capa a capa, igual que en cualquier app bien
+comportada, y **ya nunca cierra la aplicación ni pide confirmación**:
+
+1. **Sugerencias de búsqueda visibles** → las cierra.
+2. **Hoja de pestañas o menú ☰ abierta** → la cierra.
+3. **Historial web disponible** → retrocede en la página actual.
+4. **Vista de accesos del navegador** (Home interno) → si hay página
+   cargada vuelve a ella.
+5. **Fin de la pila** → **vuelve al MENÚ PRINCIPAL de TurboDL**:
+   persiste las pestañas, abre MainActivity y cierra el navegador. Las
+   pestañas abiertas se restauran la próxima vez que abras el
+   navegador — no se pierde nada.
+
+### Un único helper compartido: exitToMainMenu()
+
+Las tres formas de salir del navegador al menú — botón "App" de la
+barra inferior, celda "🏠 Menú principal" del menú ☰ y ahora el atrás
+del sistema — ejecutan el mismo código (`exitToMainMenu()`): una sola
+implementación, un solo comportamiento. «🚪 Salir» del menú ☰ sigue
+existiendo y sigue cerrando la aplicación entera, para quien quiera
+terminar la sesión completa.
+
+### Detalles técnicos
+
+- Eliminado el mecanismo de doble toque (`lastBack` + toast) del
+  `onBackPressed` de BrowserActivity.
+- `finish()` del navegador, nunca `finishAffinity()`: si
+  MainActivity comparte tarea no se ve arrastrada.
+- Sin cambios de esquema de BD ni permisos; versión 33 (4.14).
+
+---
+
 # TurboDL 4.13 — Notas de la versión
 
 Fecha: 2026-11-23

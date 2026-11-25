@@ -717,27 +717,16 @@ class BrowserActivity : Activity() {
         //   2º toque (cuando la vista principal ya está visible): la
         //   oculta y deja el campo listo para escribir una nueva búsqueda.
         findViewById<Button>(R.id.btnHome).setOnClickListener { onHomePressed() }
-        // 4.13: botón "App" — vuelve al MENÚ PRINCIPAL de la aplicación
-        // (MainActivity) en un solo toque. Antes (4.2.5–4.12) este botón
-        // solo mostraba la vista de accesos DENTRO del navegador, lo que
-        // lo hacía parecer un duplicado de btnHome y su icono ▖ no decía
-        // nada (lo reportaste). Ahora:
-        //   · persiste las pestañas antes de salir (restoreTabs las
-        //     recupera al reabrir el navegador: no se pierde nada),
-        //   · abre MainActivity (launchMode singleTask + CLEAR_TOP),
-        //   · cierra el navegador (finish).
-        // El botón ⌂ (btnHome) conserva su flujo de 2 toques DENTRO del
-        // navegador; ☰ → Salir sigue cerrando la app entera.
-        findViewById<Button>(R.id.btnMainHome).setOnClickListener {
-            persistTabs()
-            try {
-                startActivity(android.content.Intent(this, MainActivity::class.java).apply {
-                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                        android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                })
-            } catch (e: Exception) { }
-            finish()
-        }
+        // 4.13/4.14: botón "App" — vuelve al MENÚ PRINCIPAL de la
+        // aplicación (MainActivity) en un solo toque. Antes (4.2.5–4.12)
+        // este botón solo mostraba la vista de accesos DENTRO del
+        // navegador, lo que lo hacía parecer un duplicado de btnHome y su
+        // icono ▖ no decía nada (lo reportaste). La acción vive en
+        // exitToMainMenu(), compartida con el atrás del sistema y la
+        // celda "🏠 Menú principal" del menú ☰. El botón ⌂ (btnHome)
+        // conserva su flujo de 2 toques DENTRO del navegador; ☰ → Salir
+        // sigue cerrando la app entera.
+        findViewById<Button>(R.id.btnMainHome).setOnClickListener { exitToMainMenu() }
         btnVideos.setOnClickListener { hideSheets(); showDetected() }
         btnDesk.setOnClickListener { toggleDesktop() }
         btnTabCount.setOnClickListener { showTabSheet() }
@@ -3945,19 +3934,11 @@ class BrowserActivity : Activity() {
             MenuCell("🧹", "Borrar historial") { clearHistory(); toast("Historial de búsqueda borrado"); renderMenuPages() },
             MenuCell("👤", "Perfil nav.") { hideSheets(); showProfileMenu(menuSheet) },
             MenuCell("📌", "Añadir acceso") { addCurrentAsSite(); renderMenuPages() },
-            // 4.13: misma acción que el botón "App" de la barra inferior:
-            // volver al menú principal de TurboDL (no confundir con
-            // "Salir", que cierra la aplicación entera).
-            MenuCell("🏠", "Menú principal") {
-                persistTabs()
-                try {
-                    startActivity(android.content.Intent(this, MainActivity::class.java).apply {
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-                            android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    })
-                } catch (e: Exception) { }
-                finish()
-            },
+            // 4.13/4.14: misma acción que el botón "App" de la barra
+            // inferior y el atrás del sistema: volver al menú principal
+            // de TurboDL (no confundir con "Salir", que cierra la
+            // aplicación entera).
+            MenuCell("🏠", "Menú principal") { hideSheets(); exitToMainMenu() },
             MenuCell("🚪", "Salir") { finishAffinity() }
         )
     }
@@ -5712,11 +5693,16 @@ class BrowserActivity : Activity() {
         }
     }
 
-    private var lastBack = 0L
-
     /**
      * Botón atrás consistente (4.0 U4): una única máquina de estados
-     * sugerencias → hojas → inicio ↔ web → salida con confirmación.
+     * sugerencias → hojas → inicio ↔ web → menú principal.
+     *
+     * 4.14: el atrás del sistema ya NO cierra la aplicación ni pide
+     * confirmación (reportaste que "pulsa atrás otra vez para salir" es
+     * un mal flujo). Al agotar las capas del navegador (sugerencias →
+     * hojas → historial web → vista de accesos) vuelve al MENÚ PRINCIPAL
+     * de TurboDL con exitToMainMenu(), igual que el botón "App" de la
+     * barra inferior y la celda "🏠 Menú principal" del menú ☰.
      */
     override fun onBackPressed() {
         when {
@@ -5729,11 +5715,7 @@ class BrowserActivity : Activity() {
                 val t = tabs.getOrNull(cur)
                 if (t != null && (t.url.isNotEmpty() || (t.wv?.canGoBack() == true)))
                     showHome(false)
-                else {
-                    val now = System.currentTimeMillis()
-                    if (now - lastBack < 2200) finishAffinity()
-                    else { lastBack = now; toast("Pulsa atrás otra vez para salir") }
-                }
+                else exitToMainMenu()
             }
             else -> {
                 val w = activeWv()
@@ -5741,6 +5723,27 @@ class BrowserActivity : Activity() {
                 else showHome(true)
             }
         }
+    }
+
+    /**
+     * 4.14: salida ÚNICA al menú principal de la aplicación, compartida
+     * por las tres entradas (botón "App" de la barra inferior, celda
+     * "🏠 Menú principal" del menú ☰ y el atrás del sistema). Persiste
+     * las pestañas antes de salir (restoreTabs las recupera al reabrir
+     * el navegador), lanza MainActivity (launchMode singleTask +
+     * NEW_TASK | CLEAR_TOP) y cierra el navegador con finish() — nunca
+     * finishAffinity(), que arrastraría a MainActivity si comparten
+     * tarea, ni cierra la app entera.
+     */
+    private fun exitToMainMenu() {
+        persistTabs()
+        try {
+            startActivity(android.content.Intent(this, MainActivity::class.java).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            })
+        } catch (e: Exception) { }
+        finish()
     }
 
     override fun onDestroy() {
