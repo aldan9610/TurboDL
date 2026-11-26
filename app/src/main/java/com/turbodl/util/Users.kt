@@ -43,6 +43,18 @@ import java.io.File
  * en lfbrowser) además del `name` (etiqueta libre). Se persiste en el
  * JSON con key "e" (backward-compatible: usuarios viejos sin email se
  * muestran con name como fallback).
+ *
+ * 4.15 (bug reportado "cambiar usuario no funciona, se reinicia dos
+ * veces y el usuario activo no cambia"): dos defectos de raíz —
+ *   · setActive/save usaban apply() (escritura asíncrona) y el proceso
+ *     moría ~50ms después: el cambio se perdía en el disco y al
+ *     arrancar seguía el usuario anterior. Ahora usan commit()
+ *     síncrono: el valor está en disco antes de matar el proceso.
+ *   · restartApp mataba el proceso con la actividad en primer plano:
+ *     Android relanzaba la tarea por sí solo (reinicio #1) y la alarma
+ *     programada la relanzaba otra vez (reinicio #2). Ahora se manda
+ *     la tarea a segundo plano ANTES de morir: la única que relanza
+ *     es la alarma → un solo reinicio.
  */
 object Users {
 
@@ -66,9 +78,15 @@ object Users {
     }
 
     fun save(ctx: Context, list: List<U>) {
+        // 4.15: commit() síncrono. Antes se usaba apply() (escritura
+        // asíncrona en un hilo de fondo) y los cambios de usuario matan
+        // el proceso pocos ms después (restartApp): si el proceso muere
+        // antes de que el hilo escriba, la lista se pierde o el XML
+        // queda a medias. La gestión de usuarios es poco frecuente:
+        // bloquear unos ms es lo correcto aquí.
         val arr = JSONArray()
         list.forEach { arr.put(JSONObject().put("id", it.id).put("n", it.name).put("e", it.email)) }
-        sp(ctx).edit().putString("users", arr.toString()).apply()
+        sp(ctx).edit().putString("users", arr.toString()).commit()
     }
 
     fun add(ctx: Context, name: String, email: String = ""): U {
@@ -142,8 +160,18 @@ object Users {
 
     fun active(ctx: Context): String = sp(ctx).getString("activeUser", "main") ?: "main"
 
+    /**
+     * 4.15 (arregla el bug reportado "cambio de usuario no funciona"):
+     * commit() SÍNCRONO en vez de apply(). Con apply() la escritura iba
+     * a un hilo de fondo y restartApp mataba el proceso (System.exit)
+     * unos ms después: la escritura moría con el proceso y al arrancar
+     * de nuevo "activeUser" seguía siendo el usuario ANTERIOR — el
+     * cambio parecía no hacer nada. Con commit() el valor está en disco
+     * ANTES de que setActive devuelva, así que el reinicio ya nunca
+     * puede perderlo.
+     */
     fun setActive(ctx: Context, id: String) {
-        sp(ctx).edit().putString("activeUser", id).apply()
+        sp(ctx).edit().putString("activeUser", id).commit()
     }
 
     fun nameOf(ctx: Context, id: String): String =
@@ -210,14 +238,25 @@ object Users {
      * DEJABA el sufijo anterior → el WebView seguía con la sesión del
      * usuario previo aunque SP dijera que el activo era el nuevo.
      *
-     * Ahora:
-     *   1. Programa con AlarmManager un relanzamiento del launcher
-     *      intent dentro de ~1 segundo (RTC_WAKEUP). AlarmManager
-     *      entrega el intent tras el System.exit, en un proceso NUEVO.
-     *   2. Llama a System.exit(0). A diferencia de killProcess, exit
-     *      termina la VM de forma que Android NO puede reusar la
-     *      instancia de Application: el siguiente onCreate crea un
-     *      proceso nuevo y el sufijo se fija para el nuevo usuario.
+     * 4.15 (arregla el DOBLE reinicio reportado): antes se llamaba a
+     * System.exit(0) con la actividad en PRIMER PLANO. Android no puede
+     * dejar la pantalla sin tarea: al morir el proceso relanzaba la app
+     * POR SÍ SOLO (reinicio #1) y un segundo después la alarma aquí
+     * programada disparaba con FLAG_ACTIVITY_CLEAR_TASK y la volvía a
+     * relanzar (reinicio #2). El usuario veía la app arrancar dos veces.
+     * Ahora, ANTES de matar el proceso:
+     *   1. se manda la tarea a segundo plano (moveTaskToBack): así el
+     *      sistema NO la relanza automáticamente al morir el proceso y
+     *      la única que relanza es la alarma → UN solo reinicio;
+     *   2. se espera a que la transición a fondo se asiente (300ms);
+     *   3. se programa la alarma a ~400ms (dispara con el proceso ya
+     *      muerto, en un proceso nuevo donde App.onCreate vuelve a
+     *      fijar el sufijo del usuario nuevo).
+     *
+     * El System.exit(0) sigue siendo necesario: a diferencia de
+     * killProcess, termina la VM de forma que Android no reusa la
+     * instancia de Application — el siguiente arranque es un proceso
+     * nuevo y applyDataDirSuffix fija el sufijo nuevo.
      *
      * Si packageManager devuelve null (caso muy raro), no matamos: solo
      * cerramos las actividades para que el usuario reabra la app.
@@ -228,15 +267,17 @@ object Users {
         if (pi != null) {
             pi.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            // Programar el relanzamiento para dentro de 1s. Usamos
-            // AlarmManager con RTC_WAKEUP para que dispare aunque el
-            // proceso ya haya muerto. PendingIntent.getBroadcast sería
-            // más fiable pero requiere un receptor declarado; en su
-            // lugar usamos getActivity que arranca directamente la
-            // actividad launcher tras el delay.
+            // 4.15: a segundo plano ANTES de morir → el sistema no
+            // relanza la tarea por su cuenta (eso era el reinicio #1).
+            if (ctx is android.app.Activity) {
+                try { ctx.moveTaskToBack(true) } catch (e: Throwable) { }
+            }
+            try { Thread.sleep(300) } catch (e: InterruptedException) { }
             try {
                 val am = ctx.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                val triggerAt = System.currentTimeMillis() + 1000L
+                // 400ms: dispara cuando el proceso ya está muerto pero
+                // sin dejar al usuario mucho tiempo mirando el home.
+                val triggerAt = System.currentTimeMillis() + 400L
                 val pending = android.app.PendingIntent.getActivity(
                     ctx, 0, pi,
                     android.app.PendingIntent.FLAG_IMMUTABLE or

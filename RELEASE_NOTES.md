@@ -1,3 +1,64 @@
+# TurboDL 4.15 — Notas de la versión
+
+Fecha: 2026-11-26
+
+## Arreglado: cambiar de usuario en el navegador no funcionaba
+
+Bug reportado: al usar «Usuarios» dentro del navegador, la aplicación
+se **reiniciaba dos veces** y al comprobar qué usuario estaba activo,
+**seguía siendo el mismo**. Eran dos defectos de raíz distintos:
+
+### 1. El cambio se escribía en disco "a medias" (usuario sin cambiar)
+
+`Users.setActive` guardaba el usuario activo con `apply()`, una
+escritura **asíncrona** que Android encola en un hilo de fondo. Pero
+el cambio de usuario mata el proceso apenas ~50ms después
+(`restartApp` → `System.exit`) para montar la sandbox del nuevo
+usuario: si el hilo no había escrito todavía, **la escritura moría con
+el proceso** y al arrancar `activeUser` seguía siendo el anterior —
+por eso el usuario "no cambiaba" aunque la app se reiniciara. Ahora
+`setActive` y `save` usan `commit()` **síncrono**: el valor está en
+disco antes de que la función devuelva, así que ningún reinicio puede
+perderlo.
+
+### 2. Reinicio doble: el sistema relanzaba la app Y la alarma la relanzaba otra vez
+
+`restartApp` mataba el proceso con la actividad en **primer plano**.
+Android no puede dejar la pantalla sin tarea: al morir el proceso,
+**relanzaba la app por sí solo** (primer reinicio). Un segundo después
+disparaba la alarma programada por `restartApp` con
+`FLAG_ACTIVITY_CLEAR_TASK`, que volvía a arrancar todo (segundo
+reinicio). Ahora, **antes** de matar el proceso, la tarea se manda a
+segundo plano (`moveTaskToBack`): el sistema ya no la relanza
+automáticamente y la única que arranca la app es la alarma — **un solo
+reinicio**, y más rápido (la alarma pasa de 1s a ~0,4s).
+
+### Cómo verificarlo
+
+En el navegador: ☰ → «👥 Usuarios» → selecciona otro usuario →
+CAMBIAR. Debe verse UN solo reinicio y, al volver a abrir «Usuarios»
+(o «👁 Sandbox»), el usuario activo debe ser el elegido: radio marcado
+en su fila y su sesión (cookies, credenciales, historial) cargada en
+el WebView.
+
+### Tests nuevos: UsersSandboxTest (8 casos)
+
+Suite Robolectric que fija el contrato del cambio de usuario:
+`setActive` persiste de forma síncrona (releyendo desde una instancia
+nueva de SharedPreferences, lo que hará el siguiente proceso), el
+`remove()` del usuario activo reactiva «main» de inmediato (ese camino
+también reinicia la app), redondos de `add`/`list`/`update` con nombre
+y email, y precedencia de `displayOf` (email → nombre → id).
+
+### Detalles técnicos
+
+- El mecanismo de proceso nuevo (AlarmManager + `System.exit(0)`) se
+  conserva: es necesario porque `WebView.setDataDirectorySuffix` solo
+  puede fijarse una vez por proceso, antes de crear cualquier WebView.
+- Sin cambios de esquema de BD ni permisos; versión 34 (4.15).
+
+---
+
 # TurboDL 4.14 — Notas de la versión
 
 Fecha: 2026-11-23
