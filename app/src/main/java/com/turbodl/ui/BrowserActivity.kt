@@ -5346,6 +5346,9 @@ class BrowserActivity : Activity() {
         cancelBtn.setOnClickListener { dlg.dismiss() }
         changeBtn.setOnClickListener {
             if (selected == active) { dlg.dismiss(); return@setOnClickListener }
+            // 4.16: persistir pestañas antes de cambiar: el proceso muere
+            // en restartApp y el arranque no vuelve a pasar por onPause.
+            persistTabs()
             Users.setActive(this, selected)
             toast("Cambiando a «${Users.displayOf(this, selected)}» — TurboDL se reinicia…")
             Users.restartApp(this)

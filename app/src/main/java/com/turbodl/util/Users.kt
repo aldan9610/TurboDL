@@ -52,9 +52,17 @@ import java.io.File
  *     síncrono: el valor está en disco antes de matar el proceso.
  *   · restartApp mataba el proceso con la actividad en primer plano:
  *     Android relanzaba la tarea por sí solo (reinicio #1) y la alarma
- *     programada la relanzaba otra vez (reinicio #2). Ahora se manda
- *     la tarea a segundo plano ANTES de morir: la única que relanza
- *     es la alarma → un solo reinicio.
+ *     programada la relanzaba otra vez (reinicio #2).
+ *
+ * 4.16 (bug reportado "ya cambia el usuario pero la app no se reabre
+ * sola"): el arreglo de la 4.15 (pasar a 2º plano y relanzar con
+ * alarma) choca con las restricciones de Android 10+: una actividad
+ * NO puede arrancarse desde segundo plano (Background Activity
+ * Launch), así que la alarma quedaba bloqueada y la app cerrada hasta
+ * abrirla a mano. Ahora restartApp lanza el intent de arranque EN
+ * primer plano y ANTES de System.exit (estilo ProcessPhoenix): el
+ * sistema completa el lanzamiento en un proceso nuevo. Un solo
+ * reinicio, sin alarmas ni 2º plano.
  */
 object Users {
 
@@ -90,8 +98,18 @@ object Users {
     }
 
     fun add(ctx: Context, name: String, email: String = ""): U {
-        val u = U("u" + (System.currentTimeMillis() % 100000000L), name, email)
+        // 4.16: id ÚNICO garantizado. Antes era "u"+timestamp%1e8 sin más:
+        // dos altas en el mismo milisegundo (el test UsersSandboxTest lo
+        // cazó) generaban el MISMO id y la segunda machacaba la primera.
+        // add() es una acción rara del usuario: esperar 1ms ante una
+        // colisión es gratis. El formato "u<8 dígitos>" no cambia.
         val l = list(ctx)
+        var id = "u" + (System.currentTimeMillis() % 100000000L)
+        while (l.any { it.id == id }) {
+            try { Thread.sleep(1) } catch (e: InterruptedException) { }
+            id = "u" + (System.currentTimeMillis() % 100000000L)
+        }
+        val u = U(id, name, email)
         l.add(u)
         save(ctx, l)
         return u
@@ -238,20 +256,24 @@ object Users {
      * DEJABA el sufijo anterior → el WebView seguía con la sesión del
      * usuario previo aunque SP dijera que el activo era el nuevo.
      *
-     * 4.15 (arregla el DOBLE reinicio reportado): antes se llamaba a
-     * System.exit(0) con la actividad en PRIMER PLANO. Android no puede
-     * dejar la pantalla sin tarea: al morir el proceso relanzaba la app
-     * POR SÍ SOLO (reinicio #1) y un segundo después la alarma aquí
-     * programada disparaba con FLAG_ACTIVITY_CLEAR_TASK y la volvía a
-     * relanzar (reinicio #2). El usuario veía la app arrancar dos veces.
-     * Ahora, ANTES de matar el proceso:
-     *   1. se manda la tarea a segundo plano (moveTaskToBack): así el
-     *      sistema NO la relanza automáticamente al morir el proceso y
-     *      la única que relanza es la alarma → UN solo reinicio;
-     *   2. se espera a que la transición a fondo se asiente (300ms);
-     *   3. se programa la alarma a ~400ms (dispara con el proceso ya
-     *      muerto, en un proceso nuevo donde App.onCreate vuelve a
-     *      fijar el sufijo del usuario nuevo).
+     * 4.15 (arreglaba el DOBLE reinicio): mandaba la tarea a segundo
+     * plano (moveTaskToBack) y programaba una alarma para relanzar.
+     *
+     * 4.16 (arregla "ya cambia el usuario pero la app no se reabre
+     * sola"): la alarma de la 4.15 NO FUNCIONA. Desde Android 10,
+     * arrancar una actividad estando la app en SEGUNDO PLANO está
+     * prohibido (Background Activity Launch): la alarma disparaba, el
+     * sistema bloqueaba el PendingIntent.getActivity y la app quedaba
+     * cerrada hasta que el usuario la abría a mano.
+     *
+     * Ahora, estilo ProcessPhoenix (la librería canónica de "hot
+     * restart"): se lanza el intent de arranque ANTES de morir y EN
+     * primer plano (ahí sí está permitido arrancar) y a continuación
+     * System.exit(0). Al morir el proceso con el lanzamiento ya pedido,
+     * el sistema lo completa en un proceso NUEVO: App.onCreate se vuelve
+     * a ejecutar y applyDataDirSuffix fija el sufijo del usuario nuevo.
+     * Un solo reinicio, sin alarmas ni paso a 2º plano. La alarma queda
+     * SOLO como red de seguridad si el startActivity inicial falla.
      *
      * El System.exit(0) sigue siendo necesario: a diferencia de
      * killProcess, termina la VM de forma que Android no reusa la
@@ -267,26 +289,35 @@ object Users {
         if (pi != null) {
             pi.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            // 4.15: a segundo plano ANTES de morir → el sistema no
-            // relanza la tarea por su cuenta (eso era el reinicio #1).
-            if (ctx is android.app.Activity) {
-                try { ctx.moveTaskToBack(true) } catch (e: Throwable) { }
-            }
-            try { Thread.sleep(300) } catch (e: InterruptedException) { }
+            // 4.16: lanzar en PRIMER plano antes de morir. Es la clave
+            // del arreglo: desde Android 10, arrancar una actividad
+            // estando la app en SEGUNDO PLANO está prohibido (Background
+            // Activity Launch) — por eso la alarma de la 4.15, que
+            // disparaba ya en 2º plano, no reabría la app. Lanzando
+            // ANTES de morir el arranque queda "en vuelo" y el sistema
+            // lo completa en un proceso nuevo.
+            var started = false
             try {
-                val am = ctx.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                // 400ms: dispara cuando el proceso ya está muerto pero
-                // sin dejar al usuario mucho tiempo mirando el home.
-                val triggerAt = System.currentTimeMillis() + 400L
-                val pending = android.app.PendingIntent.getActivity(
-                    ctx, 0, pi,
-                    android.app.PendingIntent.FLAG_IMMUTABLE or
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT)
-                am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                ctx.startActivity(pi)
+                started = true
             } catch (e: Throwable) {
                 android.util.Log.w("TurboDL.Users",
-                    "AlarmManager falló, intentando arranque inmediato: ${e.message}")
-                try { ctx.startActivity(pi) } catch (e2: Throwable) { }
+                    "startActivity falló (${e.message}); uso la alarma como red de seguridad")
+            }
+            if (!started) {
+                try {
+                    val am = ctx.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                    // 600ms: dispara cuando el proceso ya está muerto.
+                    val triggerAt = System.currentTimeMillis() + 600L
+                    val pending = android.app.PendingIntent.getActivity(
+                        ctx, 0, pi,
+                        android.app.PendingIntent.FLAG_IMMUTABLE or
+                            android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+                    am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pending)
+                } catch (e: Throwable) {
+                    android.util.Log.w("TurboDL.Users",
+                        "AlarmManager también falló: ${e.message}")
+                }
             }
             // System.exit(0) termina la VM de forma limpia; Android no
             // puede reusar el proceso: el siguiente onCreate crea un

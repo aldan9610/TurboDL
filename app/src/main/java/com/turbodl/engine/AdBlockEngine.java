@@ -99,12 +99,22 @@ public final class AdBlockEngine {
         return ENGINE_BRAVE;
     }
 
-    /** 4.11: modo Brave EFECTIVO — preferencia "brave" y RAM >= 1,5 GB
-     *  (el motor C++ mantiene las listas en memoria nativa; en equipos
-     *  humildes se usa FilterEngine Kotlin). El motor Kotlin es además el
-     *  fallback si BraveEngine.ensure fallara al inicializarse. */
+    /** 4.11: modo Brave EFECTIVO — preferencia "brave". El motor Kotlin es
+     *  el fallback si BraveEngine.ensure fallara al inicializarse.
+     *
+     *  4.16 (bug reportado "seleccionar Brave se queda marcado pero el
+     *  toast y Ajustes dicen FilterEngine"): antes exigía además RAM
+     *  >= 1,5 GB, así que en equipos humildes la preferencia "brave" se
+     *  servía con FilterEngine EN SILENCIO — el diálogo marcaba Brave
+     *  pero engineName() devolvía "FilterEngine (Kotlin)" y el usuario
+     *  veía que su elección "no se reflejaba". Ahora se respeta
+     *  SIEMPRE la elección: si el motor nativo no puede inicializar,
+     *  BraveEngine marca unavailable y el fallback a FilterEngine sigue
+     *  cubriendo ese caso (con línea de estado en el diagnóstico). La
+     *  RAM baja solo produce un AVISO informativo en el selector de
+     *  Ajustes, ya nunca un cambio de motor sin decírselo al usuario. */
     public static boolean usaBrave(Context ctx) {
-        return ENGINE_BRAVE.equals(selectedEngine(ctx)) && !esLowRam(ctx);
+        return ENGINE_BRAVE.equals(selectedEngine(ctx));
     }
 
     /** 4.9/4.11: cambia el motor ("brave" | "kotlin" | "hosts") y fuerza
@@ -182,8 +192,10 @@ public final class AdBlockEngine {
     }
 
     /** Equipos humildes: solo EasyList (el motor Kotlin es ligero, pero
-     *  EasyPrivacy añade ~10 MB de reglas que en 1 GB no valen la pena). */
-    private static boolean esLowRam(Context ctx) {
+     *  EasyPrivacy añade ~10 MB de reglas que en 1 GB no valen la pena).
+     *  4.16: público y SOLO informativo para la UI (el selector avisa
+     *  al elegir Brave en RAM baja); ya NO decide el motor servido. */
+    public static boolean esLowRam(Context ctx) {
         try {
             ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
             if (am == null) return false;
@@ -352,8 +364,9 @@ public final class AdBlockEngine {
         fallo(new Exception("fusible: proporción de bloqueo anómala"));
     }
 
-    /** 4.9/4.11: nombre legible del motor elegido, para UI y diagnóstico.
-     *  En RAM baja la preferencia "brave" se sirve con FilterEngine. */
+    /** 4.9/4.11: nombre legible del motor ELEGIDO, para UI y diagnóstico.
+     *  4.16: refleja la elección SIEMPRE (la degradación silenciosa a
+     *  FilterEngine en RAM baja se eliminó; ver usaBrave). */
     public static String engineName(Context ctx) {
         if (ENGINE_HOSTS.equals(selectedEngine(ctx))) return "Solo hosts";
         if (usaBrave(ctx)) return "Brave (nativo)";

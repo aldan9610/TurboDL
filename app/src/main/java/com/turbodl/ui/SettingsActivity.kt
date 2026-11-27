@@ -719,7 +719,9 @@ class SettingsActivity : Activity() {
      *  Brave (nativo C++, recomendado y default), FilterEngine (Kotlin)
      *  y Solo hosts (mínimo). Al cambiar, se persiste y se fuerza la
      *  recarga del motor en segundo plano (si el bloqueador está activo).
-     *  En RAM < 1,5 GB la opción Brave se sirve con FilterEngine. */
+     *  4.16: la RAM baja (<1,5 GB) ya NO degrada Brave a FilterEngine
+     *  (era la causa del bug "selecciono Brave y no se refleja"); ahora
+     *  solo se muestra un aviso informativo y se respeta la elección. */
     private fun pickAdblockEngine() {
         val cur = com.turbodl.engine.AdBlockEngine.selectedEngine(this)
         val ids = arrayOf("brave", "kotlin", "hosts")
@@ -753,6 +755,15 @@ class SettingsActivity : Activity() {
                         if (soloHosts) {
                             toast("Motor Brave: marca listas EasyList/AdGuard " +
                                 "en Listas de filtros (no lee formato hosts)")
+                        } else if (com.turbodl.engine.AdBlockEngine.esLowRam(this)) {
+                            // 4.16: antes la RAM baja degradaba Brave a
+                            // FilterEngine EN SILENCIO (el toast y la fila de
+                            // Ajustes decían "FilterEngine" aunque el diálogo
+                            // marcara Brave — reportado). Ahora Brave se usa
+                            // siempre; aquí solo se AVISA.
+                            toast("Motor Brave en equipo de RAM baja (<1,5 GB): " +
+                                "carga algo más pesada; si el motor nativo no " +
+                                "arranca, se usa FilterEngine como respaldo")
                         }
                     }
                 }

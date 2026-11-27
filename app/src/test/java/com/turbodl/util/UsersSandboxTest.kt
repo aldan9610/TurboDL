@@ -110,6 +110,19 @@ class UsersSandboxTest {
     }
 
     @Test
+    fun `dos altas seguidas generan ids distintos (regresion 4_15)`() {
+        // En 4.15 add() usaba "u"+timestamp sin más: dos altas en el mismo
+        // milisegundo compartían id y la segunda machacaba a la primera
+        // (un flake de esta suite lo destapó). add() ya garantiza unicidad.
+        val a = Users.add(ctx, "Personal", "yo@correo.com")
+        val b = Users.add(ctx, "Trabajo", "jefe@empresa.com")
+        assertTrue("ids distintos esperados: ${a.id} == ${b.id}", a.id != b.id)
+        assertEquals(2, Users.list(ctx).size)
+        assertEquals("yo@correo.com", Users.displayOf(ctx, a.id))
+        assertEquals("jefe@empresa.com", Users.displayOf(ctx, b.id))
+    }
+
+    @Test
     fun `users list se persiste de inmediato`() {
         // save() también debe ser durable: Users.remove lo usa y luego
         // reinicia el proceso.

@@ -1,3 +1,67 @@
+# TurboDL 4.16 — Notas de la versión
+
+Fecha: 2026-11-26
+
+## Bug 1: la app ya no se reabre sola tras cambiar de usuario
+
+Reportaste que tras el mensaje «TurboDL se reinicia…» la aplicación
+**no volvía a abrirse** y había que abrirla a mano (aunque el usuario
+ya sí cambiaba). Causa: el arreglo de la 4.15 pasaba la app a segundo
+plano y confiaba en una alarma (AlarmManager) para relanzarla, pero
+**desde Android 10 arrancar una actividad desde segundo plano está
+prohibido** (Background Activity Launch): la alarma disparaba, el
+sistema bloqueaba el arranque y la app quedaba cerrada.
+
+Arreglo estilo **ProcessPhoenix** (la librería canónica de reinicio en
+caliente): el arranque se lanza **en primer plano y ANTES de matar el
+proceso** (ahí arrancar sí está permitido); al morir el proceso con el
+lanzamiento ya pedido, el sistema lo completa en un proceso nuevo,
+donde `App.onCreate` vuelve a fijar la sandbox del usuario elegido.
+Resultado: un solo reinicio, automático, sin alarmas ni fondo. La
+alarma queda solo como red de seguridad si el arranque inicial fallara.
+También se **persisten las pestañas** al pulsar CAMBIAR (antes quedaban
+a merced de `onPause`).
+
+## Bug 2: seleccionar el motor Brave por fin se refleja (y se usa)
+
+Preguntaste si el motor Brave estaba implementado o era cosmético. Lo
+está y funciona — motor nativo C++ `brave/ad-block` (AARs ad-filter +
+adblock-client con `libadblock-client.so`, integrado en 4.11 y
+predeterminado). El problema era otro: **en equipos con menos de 1,5 GB
+de RAM, `usaBrave()` degradaba en silencio a FilterEngine (Kotlin)**.
+Marcabas «Brave (nativo C++) — recomendado», quedaba marcado, pero el
+toast decía «Motor: FilterEngine (Kotlin)» y la fila de Ajustes
+también — tu elección no se reflejaba porque *no se usaba de verdad*:
+no era un bug cosmético, el motor nativo no llegaba a arrancar en tu
+equipo.
+
+Ahora **se respeta siempre la elección**: elegir Brave sirve Brave,
+también con RAM baja. Si el motor nativo no pudiera inicializar, el
+respaldo existente a FilterEngine sigue cubriendo ese caso (con su
+línea de estado en el diagnóstico). La RAM baja solo produce un **aviso
+informativo** en el selector («carga algo más pesada; si no arranca, se
+usa FilterEngine como respaldo»), nunca más un cambio de motor sin
+decírselo al usuario.
+
+## Extra: colisión de ids al crear dos usuarios muy seguidos
+
+Un test destapó que dos usuarios creados en el mismo milisegundo
+recibían el **mismo id** y el segundo machacaba al primero. `Users.add`
+ya garantiza ids únicos manteniendo el formato `u<8 dígitos>`.
+
+## Tests
+
+- `EngineChoiceTest` (4 casos, nuevo): la elección del motor se persiste
+  y `engineName` la refleja siempre — incluida la comprobación de
+  regresión en entorno de RAM baja, exactamente el perfil de equipo donde
+  la 4.15 servía FilterEngine en silencio.
+- `UsersSandboxTest` (9 casos, +1): dos altas seguidas generan ids
+  distintos.
+- Suite completa en verde; sin cambios de esquema de BD ni permisos;
+  versión 35 (4.16).
+
+---
+
 # TurboDL 4.15 — Notas de la versión
 
 Fecha: 2026-11-26
