@@ -6,6 +6,15 @@
         <item name="android:colorAccent">#FF6D00</item>
         <item name="android:windowBackground">#FAFAFA</item>
         <item name="android:fontFamily">sans-serif</item>
+        <!-- paleta propia 4.17 (claro) -->
+        <item name="tdBg">#FAFAFA</item>
+        <item name="tdCard">#FFFFFF</item>
+        <item name="tdBar">#FFFFFF</item>
+        <item name="tdText">#212121</item>
+        <item name="tdText2">#5A5A5A</item>
+        <item name="tdText3">#9E9E9E</item>
+        <item name="tdDivider">#EEEEEE</item>
+        <item name="tdSoft">#E3F2FD</item>
     </style>
 
     <style name="AppThemeDark" parent="android:Theme.Material.NoActionBar">
@@ -14,6 +23,15 @@
         <item name="android:colorAccent">#FFB300</item>
         <item name="android:windowBackground">#121212</item>
         <item name="android:fontFamily">sans-serif</item>
+        <!-- paleta propia 4.17 (oscuro) -->
+        <item name="tdBg">#121212</item>
+        <item name="tdCard">#1E1E1E</item>
+        <item name="tdBar">#1E1E1E</item>
+        <item name="tdText">#E2E2E2</item>
+        <item name="tdText2">#A8A8A8</item>
+        <item name="tdText3">#7A7A7A</item>
+        <item name="tdDivider">#2C2C2C</item>
+        <item name="tdSoft">#26323D</item>
     </style>
 
     <!-- AMOLED: negro puro, ahorra bateria en pantallas OLED -->
@@ -23,5 +41,14 @@
         <item name="android:colorAccent">#FFB300</item>
         <item name="android:windowBackground">#000000</item>
         <item name="android:fontFamily">sans-serif</item>
+        <!-- paleta propia 4.17 (AMOLED) -->
+        <item name="tdBg">#000000</item>
+        <item name="tdCard">#121212</item>
+        <item name="tdBar">#0A0A0A</item>
+        <item name="tdText">#E2E2E2</item>
+        <item name="tdText2">#A8A8A8</item>
+        <item name="tdText3">#7A7A7A</item>
+        <item name="tdDivider">#222222</item>
+        <item name="tdSoft">#1C262E</item>
     </style>
 </resources>

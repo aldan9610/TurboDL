@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Atributos de paleta propios (4.17). Cada tema (claro/oscuro/AMOLED)
+     define estos colores en themes.xml y TODA la interfaz — layouts XML
+     y código programático — los referencia, así el modo claro y el
+     oscuro son consistentes sin colores hardcodeados. -->
+<resources>
+    <!-- fondo de pantalla general -->
+    <attr name="tdBg" format="color" />
+    <!-- superficie de tarjetas / hojas / barras -->
+    <attr name="tdCard" format="color" />
+    <!-- barras del navegador y superficies elevadas -->
+    <attr name="tdBar" format="color" />
+    <!-- texto principal -->
+    <attr name="tdText" format="color" />
+    <!-- texto secundario (subtítulos, fechas) -->
+    <attr name="tdText2" format="color" />
+    <!-- texto terciario / hints -->
+    <attr name="tdText3" format="color" />
+    <!-- divisores y bordes -->
+    <attr name="tdDivider" format="color" />
+    <!-- fondo de avatares/elementos suaves -->
+    <attr name="tdSoft" format="color" />
+</resources>

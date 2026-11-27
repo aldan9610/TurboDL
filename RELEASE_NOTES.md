@@ -1,3 +1,82 @@
+# TurboDL 4.17 — Notas de la versión
+
+Fecha: 2026-11-27
+
+## Mejora 1: modo claro y oscuro en TODA la aplicación
+
+Reportaste que la vista principal y las barras del navegador no
+implementaban el tema oscuro. La causa: el sistema de temas existía
+(claro / oscuro / AMOLED por preferencia) pero gran parte de la interfaz
+pintaba colores fijos de modo claro — `browser.xml` tenía 28 literales
+(`#FFFFFF` en las barras, `#212121` en los textos), las hojas
+inferiores, sugerencias, accesos y diálogos igual, y el código de
+BrowserActivity/SettingsActivity repetía lo mismo a mano.
+
+Ahora **todo el color sale de una paleta única por tema**: nuevos
+atributos `td*` (fondo, tarjeta, barra, texto, texto secundario, hints,
+divisores, suave) definidos en cada tema y resueltos por layouts XML y
+por código a través de helpers `Ui.bg/card/bar/text/text2/text3/
+divider/soft/accent`. Auditoría completa con script: las barras del
+navegador, hojas de pestañas y menú, sugerencias, accesos directos,
+tira de pestañas, diálogo de usuarios, consola, iconos de pestañas,
+Ajustes y el fondo del WebView (adiós al "flash blanco" al cargar
+páginas en oscuro) siguen el tema. Los textos blancos sobre naranja se
+conservan a propósito; los colores semánticos (error rojo, aviso) no
+cambian. Las notas antiguas de 4.15 y anteriores también heredan la
+paleta sin perder datos.
+
+## Mejora 2: Herramientas rediseñadas con la elaboración de Ajustes
+
+La vista eran cuatro botones planos con un texto de "acerca de" pegado.
+Ahora replica el patrón de Ajustes que te gustó: **encabezados de
+sección** (Archivos · Navegador y seguridad · Acerca de) y **filas con
+título + subtítulo descriptivo**, con el mismo comportamiento táctil y
+el mismo respetado de tamaño de fuente y tipografía personalizables.
+Cada herramienta explica qué hace antes de abrirla (combinar archivos,
+suma de verificación MD5/SHA-1/SHA-256, codificadores URI/Base64,
+bóveda de credenciales y la nueva sección de Notas).
+
+## Mejora 3: Notas como herramienta — módulo completo estilo ColorNote
+
+Las notas salen del diálogo escondido del navegador y se convierten en
+una **pantalla completa** propia (Herramientas › Notas, y también el
+menú del navegador), con la estructura y funcionalidades al estilo de
+ColorNote (`com.socialnmobile.dictapps.notepad.color.note`) manteniendo
+el estilo de TurboDL:
+
+- **Cuadrícula de 2 columnas** de tarjetas con **8 colores** (paleta
+  propia: pastel en claro, oscuros armonizados en oscuro/AMOLED).
+- **Dos tipos de nota**: texto y **lista de comprobación** (checkboxes
+  con lo hecho tachado, añadir/quitar elementos, progreso "2/3" en la
+  tarjeta).
+- **Fijar arriba** (📌) — sección de fijadas siempre primera.
+- **Búsqueda en vivo** por título, texto y elementos del checklist.
+- **Orden**: fecha de modificación, fecha de creación o título (A-Z).
+- **Papelera**: borrar suave con restauración, borrado definitivo y
+  "vaciar papelera".
+- **Compartir y copiar** (las listas se exportan como ☑/☐ texto).
+- Editor a pantalla completa que **guarda al salir** (como ColorNote)
+  y descarta las notas totalmente vacías; el selector de color se abre
+  desde la barra del editor y tiñe la pantalla.
+- Entrada con contador en la fila de Herramientas ("3 notas · 1 en
+  papelera").
+
+Los datos van en `NotesDb` (esquema v2 con migración ALTER TABLE sin
+pérdida: las notas viejas quedan color naranja, tipo texto, no
+fijadas). Como toda la base del navegador, **cada usuario tiene sus
+propias notas** (sandbox por perfil).
+
+## Tests
+
+- `NotesDbAdvancedTest` (13 casos, nuevo): papelera suave/restaurar/
+  vaciar, fijadas primero, color/tipo, migración desde notas v1,
+  roundtrip JSON del checklist (incluida tolerancia a JSON corrupto),
+  progreso y búsqueda dentro de elementos.
+- `NotesDbTest` (CRUD 4.3) sigue en verde contra el esquema v2.
+- Suite completa: **177 tests, 0 fallos**; versión 36 (4.17).
+
+---
+
 # TurboDL 4.16 — Notas de la versión
 
 Fecha: 2026-11-26

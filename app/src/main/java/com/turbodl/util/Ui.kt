@@ -43,6 +43,46 @@ object Ui {
         }
     }
 
+    // -------------------- paleta por tema (4.17) --------------------
+    // Resuelven los atributos td* del tema activo (claro/oscuro/AMOLED).
+    // Todo el color de la interfaz debe salir de aquí: así el modo
+    // oscuro es consistente en TODAS las pantallas y no hay blancos
+    // fijos (era el bug de las barras del navegador y las hojas).
+
+    /** Resuelve un atributo de color del tema activo. */
+    fun c(ctx: Context, attr: Int): Int {
+        val ta = ctx.obtainStyledAttributes(intArrayOf(attr))
+        val v = try { ta.getColor(0, 0xFF00FF00.toInt()) } finally { ta.recycle() }
+        return v
+    }
+
+    /** Fondo general de la pantalla. */
+    fun bg(ctx: Context): Int = c(ctx, R.attr.tdBg)
+    /** Superficie de tarjetas, hojas inferiores y diálogos. */
+    fun card(ctx: Context): Int = c(ctx, R.attr.tdCard)
+    /** Barras (navegador arriba/abajo, paneles elevados). */
+    fun bar(ctx: Context): Int = c(ctx, R.attr.tdBar)
+    /** Texto principal. */
+    fun text(ctx: Context): Int = c(ctx, R.attr.tdText)
+    /** Texto secundario (subtítulos, fechas, descripciones). */
+    fun text2(ctx: Context): Int = c(ctx, R.attr.tdText2)
+    /** Texto terciario y hints. */
+    fun text3(ctx: Context): Int = c(ctx, R.attr.tdText3)
+    /** Divisores y bordes. */
+    fun divider(ctx: Context): Int = c(ctx, R.attr.tdDivider)
+    /** Fondo suave para avatares y resaltes ligero. */
+    fun soft(ctx: Context): Int = c(ctx, R.attr.tdSoft)
+    /** Naranja de acento según el tema (más claro en oscuro). */
+    fun accent(ctx: Context): Int = c(ctx, android.R.attr.colorAccent)
+
+    /** Drawable de botón plano (sin fondo, con ripple) del tema activo.
+     *  Es un ATRIBUTO de tema, no un recurso directo: hay que resolverlo. */
+    fun borderless(act: Activity): android.graphics.drawable.Drawable? {
+        val v = android.util.TypedValue()
+        act.theme.resolveAttribute(android.R.attr.borderlessButtonStyle, v, true)
+        return act.getDrawable(v.resourceId)
+    }
+
     fun fontScale(ctx: Context): Float {
         val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
         return p.getInt("fontScale", 100) / 100f

@@ -139,26 +139,26 @@ class BrowserActivity : Activity() {
         }
     private fun activeWv(): WebView? = if (cur in tabs.indices) tabs[cur].wv else null
 
+    // Colores de la interfaz (4.0). 4.17: dark-aware — resuelven la
+    // paleta del tema activo (claro/oscuro/AMOLED) en tiempo de uso
+    // en lugar de fijar valores de modo claro.
+    /** Azul de acento para elementos activos (más claro en oscuro). */
+    private val COLOR_ACCENT get() = if (Ui.isDark(this)) 0xFF64B5F6.toInt() else 0xFF1565C0.toInt()
+    /** Texto principal según el tema. */
+    private val COLOR_TEXT_PRIMARY get() = Ui.text(this)
+    /** Texto secundario según el tema. */
+    private val COLOR_TEXT_SECONDARY get() = Ui.text2(this)
+    /** Hints y texto deshabilitado según el tema. */
+    private val COLOR_TEXT_HINT get() = Ui.text3(this)
+    /** Naranja de acento para indicadores activos. */
+    private val COLOR_ORANGE get() = if (Ui.isDark(this)) 0xFFFF8F00.toInt() else 0xFFFF6D00.toInt()
+    /** Puntos inactivos del paginador según el tema. */
+    private val COLOR_DOT_OFF get() = if (Ui.isDark(this)) 0xFF6E6E6E.toInt() else 0xFFCCCCCC.toInt()
+
     companion object {
         /** Identificador único por pestaña: asocia las capturas de medios
          *  a su pestaña aunque el WebView se recree. */
         private var tabSeq = 0L
-
-        // Colores centralizados de la interfaz (4.0): sustituyen a los
-        // literales hex 0xFF212121 / 0xFF1565C0 / 0xFF3A3A3A repartidos por
-        // toda la clase, para que un cambio de paleta se haga en un punto.
-        /** Color de acento (azul) para elementos activos/seleccionados. */
-        internal val COLOR_ACCENT = 0xFF1565C0.toInt()
-        /** Color principal del texto sobre fondo claro. */
-        internal val COLOR_TEXT_PRIMARY = 0xFF212121.toInt()
-        /** Color secundario del texto (etiquetas, descripciones). */
-        internal val COLOR_TEXT_SECONDARY = 0xFF3A3A3A.toInt()
-        /** Gris medio para hints y texto deshabilitado. */
-        internal val COLOR_TEXT_HINT = 0xFF9E9E9E.toInt()
-        /** Naranja de acento (colorPrimary del tema) para indicadores activos. */
-        internal val COLOR_ORANGE = 0xFFFF6D00.toInt()
-        /** Gris claro para puntos inactivos del paginador. */
-        internal val COLOR_DOT_OFF = 0xFFCCCCCC.toInt()
 
         // ---------------- menú inferior paginado (4.0; dinámico 4.2.2) ----------------
         // 4.2.2: el menú ya no asume un nº fijo de páginas. Las celdas se
@@ -1662,6 +1662,8 @@ class BrowserActivity : Activity() {
     private fun ensureWv(t: Tab): WebView {
         t.wv?.let { return it }
         val w = WebView(this)
+        // 4.17: el fondo del WebView sigue el tema (sin flash blanco en oscuro)
+        w.setBackgroundColor(Ui.bg(this))
         val ws = w.settings
         ws.javaScriptEnabled = true
         ws.domStorageEnabled = true
@@ -1908,13 +1910,13 @@ class BrowserActivity : Activity() {
         val label = (if (t.priv) "🕵 " else "") +
             t.title.ifEmpty { if (t.url.isEmpty()) "Inicio" else MediaProbe.hostOf(t.url) }
         tv.text = label
-        tv.setTextColor(if (i == cur) 0xFF212121.toInt() else Color.WHITE)
+        tv.setTextColor(if (i == cur) Ui.text(this) else Color.WHITE)
         row.addView(tv)
         val x = TextView(this)
         x.text = "×"
         x.textSize = 16f
         x.setPadding(dp(8), 0, 0, 0)
-        x.setTextColor(if (i == cur) 0xFF212121.toInt() else Color.WHITE)
+        x.setTextColor(if (i == cur) Ui.text(this) else Color.WHITE)
         x.contentDescription = "Cerrar ${label.take(20)}"
         x.setOnClickListener { closeTab(tabs.indexOf(t)) }
         row.addView(x)
@@ -3719,7 +3721,7 @@ class BrowserActivity : Activity() {
         val host = MediaProbe.hostOf(t.url)
         val bgc = GradientDrawable()
         bgc.shape = GradientDrawable.OVAL
-        bgc.setColor(if (t.url.isEmpty()) 0xFF8A8A8A.toInt()
+        bgc.setColor(if (t.url.isEmpty()) Ui.text3(this)
         else Color.HSVToColor(floatArrayOf(
             (Math.abs(host.hashCode()) % 360).toFloat(), 0.55f, 0.62f)))
         fav.background = bgc
@@ -3734,13 +3736,13 @@ class BrowserActivity : Activity() {
         tv.setPadding(dp(12), 0, dp(8), 0)
         tv.text = (if (t.priv) "🕵 " else "") +
             t.title.ifEmpty { if (t.url.isEmpty()) "Inicio" else host }
-        tv.setTextColor(if (i == cur) 0xFF1565C0.toInt() else 0xFF212121.toInt())
+        tv.setTextColor(if (i == cur) Ui.accent(this) else Ui.text(this))
         row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val x = TextView(this)
         x.text = "✕"
         x.textSize = 15f
         x.setPadding(dp(12), dp(4), dp(12), dp(4))
-        x.setTextColor(0xFF5A5A5A.toInt())
+        x.setTextColor(Ui.text2(this))
         x.contentDescription = "Cerrar ${tv.text.take(20)}"
         x.setOnClickListener {
             closeTab(i)
@@ -3907,7 +3909,7 @@ class BrowserActivity : Activity() {
             MenuCell("🔑", "Bóveda") { hideSheets(); startActivity(android.content.Intent(this, VaultActivity::class.java)) },
             // --- herramientas ---
             MenuCell("🔍", "Buscar pág.") { hideSheets(); findInPage() },
-            MenuCell("🗒", "Notas") { hideSheets(); showNotes() },
+            MenuCell("🗒", "Notas") { hideSheets(); startActivity(android.content.Intent(this, com.turbodl.ui.NotesActivity::class.java)) },
             MenuCell("📤", "Exportar") { hideSheets(); showExportDialog() },
             MenuCell("📦", "Guardar offline") { hideSheets(); saveCurrentOffline() },
             MenuCell("🗄", "Págs. guardadas") { hideSheets(); showSavedPages() },
@@ -4242,14 +4244,14 @@ class BrowserActivity : Activity() {
         t1.setSingleLine(true)
         t1.ellipsize = android.text.TextUtils.TruncateAt.END
         t1.text = s.title
-        t1.setTextColor(0xFF212121.toInt())
+        t1.setTextColor(Ui.text(this))
         col.addView(t1)
         val t2 = TextView(this)
         t2.textSize = 11f
         t2.setSingleLine(true)
         t2.ellipsize = android.text.TextUtils.TruncateAt.END
         t2.text = s.url
-        t2.setTextColor(0xFF9E9E9E.toInt())
+        t2.setTextColor(Ui.text3(this))
         col.addView(t2)
         row.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val go = TextView(this)
@@ -4625,244 +4627,6 @@ class BrowserActivity : Activity() {
         } catch (e: Exception) { cb("") }
     }
 
-    // ---------------- notas (F5) ----------------
-
-    /** Notas con CRUD funcional (4.3): la 4.2 tenía el CRUD completo en
-     *  la BD pero el usuario no podía abrir Notas porque el GestureDetector
-     *  del swipe del menú bloqueaba los clics en las celdas. Arreglado eso
-     *  (ver menuPager VelocityTracker), se reescribe la UI de notas para
-     *  que sea clara y usable:
-     *   · Tarjetas verticales (ScrollView) en vez de ListView anidado.
-     *   · Cada tarjeta muestra título, vista previa del cuerpo y fecha, y
-     *     botones inline visibles: ✏ Editar, 📋 Copiar, ↗ Compartir, 🗑 Borrar.
-     *     Nada de menú contextual oculto que el usuario no encuentre.
-     *   · Caja de búsqueda en la cabecera que filtra por título/cuerpo.
-     *   · Botón ＋ Nueva nota visible en la cabecera.
-     *   · Tras crear/editar/borrar, la lista se refresca íntegramente.
-     *   · Borrar pide confirmación.
-     */
-    private fun showNotes(initialQuery: String = "") {
-        val ndb = com.turbodl.db.NotesDb.get(this)
-        val rows = ArrayList<com.turbodl.db.NotesDb.Note>()
-        rows.addAll(ndb.notes(initialQuery))
-
-        val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.setPadding(dp(12), dp(12), dp(12), dp(12))
-
-        // --- cabecera: caja de búsqueda + botón nueva nota ---
-        val header = LinearLayout(this)
-        header.orientation = LinearLayout.HORIZONTAL
-        header.gravity = Gravity.CENTER_VERTICAL
-        val searchBox = android.widget.EditText(this)
-        searchBox.hint = "🔍 Buscar en notas…"
-        searchBox.setText(initialQuery)
-        searchBox.setSingleLine(true)
-        val searchLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
-        searchLp.weight = 1f
-        searchBox.layoutParams = searchLp
-        searchBox.setPadding(dp(8), dp(8), dp(8), dp(8))
-        val btnNew = Button(this)
-        btnNew.text = "＋ Nueva"
-        btnNew.setPadding(dp(12), dp(8), dp(12), dp(8))
-        header.addView(searchBox)
-        header.addView(btnNew)
-        root.addView(header, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        // --- contenedor de tarjetas (ScrollView) ---
-        val scroll = android.widget.ScrollView(this)
-        val cards = LinearLayout(this)
-        cards.orientation = LinearLayout.VERTICAL
-        scroll.addView(cards, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(scroll, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0).apply { weight = 1f })
-
-        val dlg = AlertDialog.Builder(this)
-            .setTitle("🗒 Notas")
-            .setView(root)
-            .setNegativeButton("Cerrar", null)
-            .create()
-
-        // Refresca íntegramente las tarjetas a partir de `rows`.
-        fun rebuildCards() {
-            cards.removeAllViews()
-            dlg.setTitle("🗒 Notas (${rows.size})")
-            if (rows.isEmpty()) {
-                val empty = TextView(this)
-                empty.text = if (searchBox.text.isBlank())
-                    "Sin notas todavía. Pulsa ＋ Nueva para crear una."
-                else "Ninguna nota coincide con «${searchBox.text}»."
-                empty.setPadding(dp(4), dp(16), dp(4), dp(16))
-                cards.addView(empty)
-                return
-            }
-            for (n in rows) {
-                val card = LinearLayout(this)
-                card.orientation = LinearLayout.VERTICAL
-                card.setPadding(dp(12), dp(10), dp(12), dp(10))
-                val bg = android.graphics.drawable.GradientDrawable()
-                bg.setColor(0xFFEFEFEF.toInt())
-                bg.cornerRadius = 8f
-                bg.setStroke(1, 0xFFCCCCCC.toInt())
-                card.background = bg
-                // Título (negrita) + fecha.
-                val titleRow = LinearLayout(this)
-                titleRow.orientation = LinearLayout.HORIZONTAL
-                titleRow.gravity = Gravity.CENTER_VERTICAL
-                val titleTv = TextView(this)
-                titleTv.text = n.title.ifEmpty { "(sin título)" }
-                titleTv.setTypeface(titleTv.typeface, android.graphics.Typeface.BOLD)
-                titleTv.textSize = 15f
-                val tlp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
-                tlp.weight = 1f
-                titleTv.layoutParams = tlp
-                val dateTv = TextView(this)
-                dateTv.text = java.text.DateFormat.getDateTimeInstance(
-                    java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
-                    .format(java.util.Date(n.time))
-                dateTv.textSize = 11f
-                dateTv.setTextColor(0xFF888888.toInt())
-                titleRow.addView(titleTv)
-                titleRow.addView(dateTv)
-                card.addView(titleRow)
-                // Vista previa del cuerpo.
-                val bodyTv = TextView(this)
-                bodyTv.text = n.body.replace('\n', ' ').take(120)
-                bodyTv.textSize = 13f
-                bodyTv.setTextColor(0xFF444444.toInt())
-                bodyTv.setPadding(0, dp(4), 0, dp(8))
-                card.addView(bodyTv)
-                // Fila de botones inline.
-                val btnRow = LinearLayout(this)
-                btnRow.orientation = LinearLayout.HORIZONTAL
-                fun mkBtn(label: String, color: Int, fn: () -> Unit) {
-                    val b = Button(this)
-                    b.text = label
-                    b.textSize = 12f
-                    b.setTextColor(color)
-                    b.setPadding(dp(14), dp(6), dp(14), dp(6))
-                    b.minWidth = 0
-                    b.minimumWidth = 0
-                    b.setOnClickListener { fn() }
-                    btnRow.addView(b)
-                }
-                mkBtn("✏ Editar", 0xFF1B5E20.toInt()) {
-                    dlg.dismiss()
-                    editNote(n.id) { showNotes(searchBox.text.toString()) }
-                }
-                mkBtn("📋 Copiar", 0xFF0D47A1.toInt()) {
-                    clipboard(n.body)
-                    toast("Copiado: pégalo donde quieras")
-                }
-                mkBtn("↗ Compartir", 0xFF4A148C.toInt()) {
-                    try {
-                        val i = android.content.Intent(android.content.Intent.ACTION_SEND)
-                            .setType("text/plain")
-                            .putExtra(android.content.Intent.EXTRA_TEXT, n.body)
-                        startActivity(android.content.Intent.createChooser(i, "Compartir nota"))
-                    } catch (e: Exception) { }
-                }
-                mkBtn("🗑 Borrar", 0xFFB71C1C.toInt()) {
-                    AlertDialog.Builder(this)
-                        .setTitle("Eliminar nota")
-                        .setMessage("¿Borrar «${n.title.ifEmpty { "(sin título)" }}»?")
-                        .setPositiveButton("Eliminar") { _, _ ->
-                            ndb.deleteNote(n.id)
-                            rows.remove(n)
-                            rebuildCards()
-                            toast("Nota eliminada")
-                        }
-                        .setNegativeButton("Cancelar", null)
-                        .show()
-                }
-                card.addView(btnRow)
-                val clp = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT)
-                clp.bottomMargin = dp(8)
-                card.layoutParams = clp
-                cards.addView(card)
-            }
-        }
-        rebuildCards()
-
-        btnNew.setOnClickListener {
-            dlg.dismiss()
-            editNote(-1L) { showNotes(searchBox.text.toString()) }
-        }
-        // Filtrado en vivo por título/cuerpo.
-        searchBox.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { }
-            override fun afterTextChanged(s: android.text.Editable?) {
-                val q = s?.toString() ?: ""
-                rows.clear()
-                rows.addAll(ndb.notes(q))
-                rebuildCards()
-            }
-        })
-        dlg.show()
-    }
-
-    /**
-     * Editor de nota: creación y edición (misma ventana).
-     * 4.3: campos con padding cómodo, botón de copiar, callback onSaved
-     * para refrescar la lista al cerrar.
-     */
-    private fun editNote(id: Long, onSaved: () -> Unit = {}) {
-        val ndb = com.turbodl.db.NotesDb.get(this)
-        val existing = if (id > 0) ndb.getNote(id) else null
-        val lay = LinearLayout(this)
-        lay.orientation = LinearLayout.VERTICAL
-        lay.setPadding(dp(16), dp(12), dp(16), dp(4))
-        val et = android.widget.EditText(this)
-        et.hint = "Título (opcional)"
-        et.setText(existing?.title ?: "")
-        et.setSingleLine(true)
-        et.textSize = 16f
-        lay.addView(et, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT))
-        val eb = android.widget.EditText(this)
-        eb.hint = "Escribe aquí el texto…"
-        eb.setMinLines(8)
-        eb.gravity = Gravity.TOP
-        eb.setText(existing?.body ?: "")
-        eb.textSize = 15f
-        val elp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT)
-        elp.topMargin = dp(8)
-        eb.layoutParams = elp
-        lay.addView(eb)
-        AlertDialog.Builder(this)
-            .setTitle(if (existing == null) "Nueva nota" else "Editar nota")
-            .setView(lay)
-            .setPositiveButton("Guardar") { _, _ ->
-                val t = et.text.toString().trim()
-                val b = eb.text.toString()
-                if (b.isBlank() && t.isBlank()) {
-                    toast("La nota está vacía")
-                    return@setPositiveButton
-                }
-                if (existing == null)
-                    ndb.addNote(t, b, tabs.getOrNull(cur)?.url ?: "")
-                else ndb.updateNote(existing.id, t, b)
-                toast("Nota guardada")
-                onSaved()
-            }
-            .setNeutralButton("📋 Copiar todo") { _, _ ->
-                clipboard(eb.text.toString())
-                toast("Copiado al portapapeles")
-            }
-            .setNegativeButton("Cancelar", null)
-            .show()
-    }
-
     // ---------------- páginas guardadas offline (F4) ----------------
 
     private fun saveCurrentOffline() {
@@ -5083,7 +4847,7 @@ class BrowserActivity : Activity() {
                 v.setTextColor(when (c.level) {
                     "error" -> 0xFFC62828.toInt()
                     "warn" -> 0xFFEF6C00.toInt()
-                    else -> 0xFF212121.toInt()
+                    else -> Ui.text(this@BrowserActivity)
                 })
                 return v
             }
@@ -5168,7 +4932,7 @@ class BrowserActivity : Activity() {
         titleTv.text = "USUARIOS"
         titleTv.setTypeface(titleTv.typeface, android.graphics.Typeface.BOLD)
         titleTv.textSize = 20f
-        titleTv.setTextColor(0xFF212121.toInt())
+        titleTv.setTextColor(Ui.text(this))
         val tlp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
         tlp.weight = 1f
         titleTv.layoutParams = tlp
@@ -5176,7 +4940,7 @@ class BrowserActivity : Activity() {
         addTv.text = "AGREGAR"
         addTv.setTypeface(addTv.typeface, android.graphics.Typeface.BOLD)
         addTv.textSize = 14f
-        addTv.setTextColor(0xFF1E88E5.toInt())
+        addTv.setTextColor(Ui.accent(this))
         addTv.setPadding(dp(12), dp(8), dp(12), dp(8))
         topRow.addView(titleTv)
         topRow.addView(addTv)
@@ -5186,7 +4950,7 @@ class BrowserActivity : Activity() {
         val descTv = TextView(this)
         descTv.text = "Puedes cambiar entre múltiples cuentas de usuario en este navegador. Cada una mantiene sus propias credenciales."
         descTv.textSize = 13f
-        descTv.setTextColor(0xFF616161.toInt())
+        descTv.setTextColor(Ui.text2(this))
         descTv.setLineSpacing(dp(2).toFloat(), 1f)
         descTv.setPadding(0, dp(8), 0, dp(12))
         root.addView(descTv)
@@ -5224,7 +4988,7 @@ class BrowserActivity : Activity() {
             avatar.gravity = Gravity.CENTER
             val avSize = dp(40)
             val avBg = android.graphics.drawable.GradientDrawable()
-            avBg.setColor(0xFFE3F2FD.toInt())
+            avBg.setColor(Ui.soft(this))
             avBg.cornerRadius = avSize / 2f
             avatar.background = avBg
             avatar.layoutParams = LinearLayout.LayoutParams(avSize, avSize)
@@ -5235,7 +4999,7 @@ class BrowserActivity : Activity() {
             val ident = if (isMain) "Principal" else u.email.ifEmpty { u.name.ifEmpty { u.id } }
             identTv.text = ident
             identTv.textSize = 15f
-            identTv.setTextColor(0xFF212121.toInt())
+            identTv.setTextColor(Ui.text(this))
             identTv.paint.isUnderlineText = true
             identTv.setPadding(dp(14), 0, 0, 0)
             val ilp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -5308,7 +5072,7 @@ class BrowserActivity : Activity() {
             // divisor
             for (u in users) {
                 val div = android.view.View(this)
-                div.setBackgroundColor(0xFFE0E0E0.toInt())
+                div.setBackgroundColor(Ui.divider(this))
                 div.layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 1)
                 listHost.addView(div)
@@ -5326,8 +5090,8 @@ class BrowserActivity : Activity() {
         btnRow.setPadding(0, dp(16), 0, 0)
         val cancelBtn = Button(this)
         cancelBtn.text = "CANCELAR"
-        cancelBtn.setTextColor(0xFF616161.toInt())
-        cancelBtn.setBackgroundColor(0xFFE0E0E0.toInt())
+        cancelBtn.setTextColor(Ui.text2(this))
+        cancelBtn.setBackgroundColor(Ui.divider(this))
         cancelBtn.setPadding(dp(16), dp(12), dp(16), dp(12))
         val clp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT)
         clp.weight = 1f

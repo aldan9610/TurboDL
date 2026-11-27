@@ -169,7 +169,7 @@ class SettingsActivity : Activity() {
         v.addView(t1)
         if (sub.isNotEmpty()) {
             val t2 = TextView(this); t2.text = sub; t2.textSize = 12f
-            t2.setTextColor(0xFF888888.toInt())
+            t2.setTextColor(Ui.text2(this))
             v.addView(t2)
         }
         v.setOnClickListener { f() }
@@ -932,7 +932,7 @@ class SettingsActivity : Activity() {
         // --- tipo de proxy (spinner) ---
         val typeLabel = TextView(this).apply {
             text = "Tipo de proxy"
-            textSize = 13f; setTextColor(0xFF888888.toInt()); setPadding(0, 0, 0, dp(4))
+            textSize = 13f; setTextColor(Ui.text2(this@SettingsActivity)); setPadding(0, 0, 0, dp(4))
         }
         lay.addView(typeLabel)
         val types = com.turbodl.util.Proxy.TYPES
@@ -950,7 +950,7 @@ class SettingsActivity : Activity() {
         // --- host ---
         val hostLabel = TextView(this).apply {
             text = "Host (p. ej. 192.168.1.10 o proxy.mi ISP.com)"
-            textSize = 13f; setColor(0xFF888888.toInt()); setPadding(0, dp(12), 0, dp(4))
+            textSize = 13f; setColor(Ui.text2(this@SettingsActivity)); setPadding(0, dp(12), 0, dp(4))
         }
         lay.addView(hostLabel)
         val hostEt = android.widget.EditText(this).apply {
@@ -964,7 +964,7 @@ class SettingsActivity : Activity() {
         // --- puerto ---
         val portLabel = TextView(this).apply {
             text = "Puerto (1-65535)"
-            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(Ui.text2(this@SettingsActivity))
         }
         lay.addView(portLabel)
         val portEt = android.widget.EditText(this).apply {
@@ -980,7 +980,7 @@ class SettingsActivity : Activity() {
         // --- usuario ---
         val userLabel = TextView(this).apply {
             text = "Usuario (opcional; SOCKS4 no lo admite)"
-            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(Ui.text2(this@SettingsActivity))
         }
         lay.addView(userLabel)
         val userEt = android.widget.EditText(this).apply {
@@ -994,7 +994,7 @@ class SettingsActivity : Activity() {
         // --- contraseña ---
         val passLabel = TextView(this).apply {
             text = "Contraseña (opcional)"
-            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(0xFF888888.toInt())
+            textSize = 13f; setPadding(0, dp(8), 0, dp(4)); setTextColor(Ui.text2(this@SettingsActivity))
         }
         lay.addView(passLabel)
         val passEt = android.widget.EditText(this).apply {
@@ -1012,7 +1012,7 @@ class SettingsActivity : Activity() {
                 "FTP solo admite SOCKS (no HTTP-proxy). El navegador " +
                 "requiere Android 9+ con WebView actualizable; en versiones " +
                 "anteriores el navegador usa el proxy del sistema."
-            textSize = 12f; setPadding(0, dp(12), 0, 0); setTextColor(0xFF888888.toInt())
+            textSize = 12f; setPadding(0, dp(12), 0, 0); setTextColor(Ui.text2(this@SettingsActivity))
             setLineSpacing(dp(2).toFloat(), 1f)
         }
         lay.addView(info)

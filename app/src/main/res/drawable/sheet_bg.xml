@@ -3,7 +3,7 @@
      superiores redondeadas, estilo del nuevo navegador 4.0 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#FFFFFF" />
+    <solid android:color="?attr/tdCard" />
     <corners
         android:topLeftRadius="18dp"
         android:topRightRadius="18dp" />

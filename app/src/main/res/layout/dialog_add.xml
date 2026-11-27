@@ -121,7 +121,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:textSize="11sp"
-            android:textColor="#9E9E9E"
+            android:textColor="?attr/tdText3"
             android:text="El destino se configura en Ajustes › Carpeta de descarga" />
     </LinearLayout>
 </ScrollView>

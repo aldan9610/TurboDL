@@ -35,7 +35,7 @@
             android:gravity="center"
             android:maxLines="1"
             android:text="Sitio"
-            android:textColor="#212121"
+            android:textColor="?attr/tdText"
             android:textSize="11sp" />
     </LinearLayout>
 
